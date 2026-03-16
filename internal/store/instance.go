@@ -1,0 +1,139 @@
+package store
+
+import (
+	"database/sql"
+	"fmt"
+	"time"
+)
+
+type Instance struct {
+	ID        string
+	Name      string
+	Directory string
+	Port      int
+	Password  string
+	Status    string
+	AutoStart bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+func (s *Store) CreateInstance(inst *Instance) error {
+	_, err := s.db.Exec(
+		`INSERT INTO instances (id, name, directory, port, password, status, auto_start)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		inst.ID, inst.Name, inst.Directory, inst.Port, inst.Password, inst.Status, inst.AutoStart,
+	)
+	if err != nil {
+		return fmt.Errorf("creating instance: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetInstance(id string) (*Instance, error) {
+	return s.scanInstance(s.db.QueryRow(
+		`SELECT id, name, directory, port, password, status, auto_start, created_at, updated_at
+		 FROM instances WHERE id = ?`, id,
+	))
+}
+
+func (s *Store) GetInstanceByName(name string) (*Instance, error) {
+	return s.scanInstance(s.db.QueryRow(
+		`SELECT id, name, directory, port, password, status, auto_start, created_at, updated_at
+		 FROM instances WHERE name = ?`, name,
+	))
+}
+
+func (s *Store) ListInstances() ([]*Instance, error) {
+	rows, err := s.db.Query(
+		`SELECT id, name, directory, port, password, status, auto_start, created_at, updated_at
+		 FROM instances ORDER BY name`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing instances: %w", err)
+	}
+	defer rows.Close()
+
+	var instances []*Instance
+	for rows.Next() {
+		inst, err := s.scanInstanceRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		instances = append(instances, inst)
+	}
+	return instances, rows.Err()
+}
+
+func (s *Store) UpdateInstanceStatus(id, status string) error {
+	_, err := s.db.Exec(
+		`UPDATE instances SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		status, id,
+	)
+	return err
+}
+
+func (s *Store) UpdateInstancePort(id string, port int) error {
+	_, err := s.db.Exec(
+		`UPDATE instances SET port = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		port, id,
+	)
+	return err
+}
+
+func (s *Store) DeleteInstance(id string) error {
+	_, err := s.db.Exec(`DELETE FROM instances WHERE id = ?`, id)
+	return err
+}
+
+func (s *Store) GetRunningInstances() ([]*Instance, error) {
+	rows, err := s.db.Query(
+		`SELECT id, name, directory, port, password, status, auto_start, created_at, updated_at
+		 FROM instances WHERE status = 'running' OR auto_start = 1`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting running instances: %w", err)
+	}
+	defer rows.Close()
+
+	var instances []*Instance
+	for rows.Next() {
+		inst, err := s.scanInstanceRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		instances = append(instances, inst)
+	}
+	return instances, rows.Err()
+}
+
+func (s *Store) scanInstance(row *sql.Row) (*Instance, error) {
+	inst := &Instance{}
+	err := row.Scan(
+		&inst.ID, &inst.Name, &inst.Directory, &inst.Port, &inst.Password,
+		&inst.Status, &inst.AutoStart, &inst.CreatedAt, &inst.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("scanning instance: %w", err)
+	}
+	return inst, nil
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func (s *Store) scanInstanceRow(row rowScanner) (*Instance, error) {
+	inst := &Instance{}
+	err := row.Scan(
+		&inst.ID, &inst.Name, &inst.Directory, &inst.Port, &inst.Password,
+		&inst.Status, &inst.AutoStart, &inst.CreatedAt, &inst.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("scanning instance: %w", err)
+	}
+	return inst, nil
+}

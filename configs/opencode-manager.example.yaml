@@ -1,0 +1,19 @@
+telegram:
+  token: "123456:ABC-DEF..."           # Your Telegram bot token from @BotFather
+  allowed_users: [12345678]            # Authorized Telegram user IDs
+
+process:
+  opencode_binary: "opencode"          # Binary name or full path
+  port_range:
+    start: 14096
+    end: 14196
+  health_check_interval: 30s
+  max_restart_attempts: 3
+
+projects:                               # Pre-registered projects (optional)
+  # - name: "myproject"
+  #   directory: "/home/user/myproject"
+  #   auto_start: true
+
+storage:
+  database: "./data/opencode-manager.db"
