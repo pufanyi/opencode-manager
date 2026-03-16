@@ -20,7 +20,6 @@ func (h *Handlers) HandleCallback(ctx context.Context, b *bot.Bot, update *model
 	userID := update.CallbackQuery.From.ID
 	chatID := update.CallbackQuery.Message.Message.Chat.ID
 
-	// Acknowledge callback
 	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
 		CallbackQueryID: update.CallbackQuery.ID,
 	})
@@ -75,17 +74,8 @@ func (h *Handlers) callbackStop(ctx context.Context, b *bot.Bot, chatID int64, u
 		return
 	}
 
-	// Cancel SSE subscriber
-	if cancel, ok := h.sseSubscribers[instanceID]; ok {
-		cancel()
-		delete(h.sseSubscribers, instanceID)
-	}
-
 	if err := h.procMgr.StopInstance(instanceID); err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: chatID,
-			Text:   fmt.Sprintf("Failed to stop: %s", err),
-		})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to stop: %s", err)})
 		return
 	}
 
@@ -111,14 +101,9 @@ func (h *Handlers) callbackStart(ctx context.Context, b *bot.Bot, chatID int64, 
 	}
 
 	if err := h.procMgr.StartInstance(instanceID); err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: chatID,
-			Text:   fmt.Sprintf("Failed to start: %s", err),
-		})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to start: %s", err)})
 		return
 	}
-
-	h.startSSEListener(inst)
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
@@ -136,17 +121,8 @@ func (h *Handlers) callbackDelete(ctx context.Context, b *bot.Bot, chatID int64,
 
 	name := inst.Name
 
-	// Cancel SSE subscriber
-	if cancel, ok := h.sseSubscribers[instanceID]; ok {
-		cancel()
-		delete(h.sseSubscribers, instanceID)
-	}
-
 	if err := h.procMgr.DeleteInstance(instanceID); err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: chatID,
-			Text:   fmt.Sprintf("Failed to delete: %s", err),
-		})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to delete: %s", err)})
 		return
 	}
 
@@ -178,17 +154,14 @@ func (h *Handlers) callbackSession(ctx context.Context, b *bot.Bot, chatID int64
 }
 
 func (h *Handlers) callbackAbort(ctx context.Context, b *bot.Bot, chatID int64, userID int64, sessionID string) {
-	inst, client, err := h.getActiveClient(userID)
+	inst, err := h.getActiveInstance(userID)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: err.Error()})
 		return
 	}
 
-	if err := client.Abort(sessionID); err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: chatID,
-			Text:   fmt.Sprintf("Failed to abort: %s", err),
-		})
+	if err := inst.Provider.Abort(ctx, sessionID); err != nil {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to abort: %s", err)})
 		return
 	}
 
@@ -202,34 +175,23 @@ func (h *Handlers) callbackAbort(ctx context.Context, b *bot.Bot, chatID int64, 
 }
 
 func (h *Handlers) callbackNewSession(ctx context.Context, b *bot.Bot, chatID int64, userID int64) {
-	_, client, err := h.getActiveClient(userID)
+	inst, err := h.getActiveInstance(userID)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: err.Error()})
 		return
 	}
 
-	session, err := client.CreateSession()
+	session, err := inst.Provider.CreateSession(ctx)
 	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: chatID,
-			Text:   fmt.Sprintf("Failed to create session: %s", err),
-		})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to create session: %s", err)})
 		return
 	}
 
 	_ = h.store.SetActiveSession(userID, session.ID)
 
-	state, _ := h.store.GetUserState(userID)
-	inst := h.procMgr.GetInstance(state.ActiveInstanceID)
-
-	instName := "unknown"
-	if inst != nil {
-		instName = inst.Name
-	}
-
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
-		Text:      fmt.Sprintf("*[%s]* New session: `%s`", escapeMarkdown(instName), session.ID),
+		Text:      fmt.Sprintf("*[%s]* New session: `%s`", escapeMarkdown(inst.Name), session.ID),
 		ParseMode: models.ParseModeMarkdown,
 	})
 }

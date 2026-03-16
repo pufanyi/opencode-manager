@@ -6,35 +6,37 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pufanyi/opencode-manager/internal/provider"
 	"github.com/pufanyi/opencode-manager/internal/store"
 )
 
 type CrashCallback func(inst *Instance, err error)
 
 type Manager struct {
-	mu       sync.RWMutex
-	instances map[string]*Instance // keyed by ID
-	binary   string
-	portPool *PortPool
-	store    *store.Store
+	mu             sync.RWMutex
+	instances      map[string]*Instance // keyed by ID
+	opencodeBinary string
+	claudeBinary   string
+	portPool       *PortPool
+	store          *store.Store
 	healthInterval time.Duration
 	maxRestarts    int
-	onCrash  CrashCallback
+	onCrash        CrashCallback
 
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
-func NewManager(ctx context.Context, binary string, portPool *PortPool, st *store.Store, healthInterval time.Duration, maxRestarts int) *Manager {
+func NewManager(ctx context.Context, opencodeBinary, claudeBinary string, portPool *PortPool, st *store.Store, healthInterval time.Duration, maxRestarts int) *Manager {
 	mCtx, cancel := context.WithCancel(ctx)
 	return &Manager{
 		instances:      make(map[string]*Instance),
-		binary:         binary,
+		opencodeBinary: opencodeBinary,
+		claudeBinary:   claudeBinary,
 		portPool:       portPool,
 		store:          st,
 		healthInterval: healthInterval,
@@ -48,39 +50,54 @@ func (m *Manager) SetCrashCallback(cb CrashCallback) {
 	m.onCrash = cb
 }
 
-func (m *Manager) CreateAndStart(name, directory string, autoStart bool) (*Instance, error) {
-	port, err := m.portPool.Allocate()
-	if err != nil {
-		return nil, err
+func (m *Manager) CreateAndStart(name, directory string, autoStart bool, providerType provider.Type) (*Instance, error) {
+	if providerType == "" {
+		providerType = provider.TypeOpenCode
 	}
 
-	password, err := generatePassword()
-	if err != nil {
-		m.portPool.Release(port)
-		return nil, err
-	}
 	id := uuid.New().String()
+	var port int
+	var password string
+
+	if providerType == provider.TypeOpenCode {
+		var err error
+		port, err = m.portPool.Allocate()
+		if err != nil {
+			return nil, err
+		}
+		password, err = generatePassword()
+		if err != nil {
+			m.portPool.Release(port)
+			return nil, err
+		}
+	}
+
+	prov := m.createProvider(providerType, directory, port, password, id)
 
 	inst := &Instance{
-		ID:        id,
-		Name:      name,
-		Directory: directory,
-		Port:      port,
-		Password:  password,
-		status:    StatusStopped,
+		ID:           id,
+		Name:         name,
+		Directory:    directory,
+		Port:         port,
+		Password:     password,
+		ProviderType: providerType,
+		Provider:     prov,
+		status:       StatusStopped,
 	}
 
-	// Save to DB
 	if err := m.store.CreateInstance(&store.Instance{
-		ID:        id,
-		Name:      name,
-		Directory: directory,
-		Port:      port,
-		Password:  password,
-		Status:    string(StatusStopped),
-		AutoStart: autoStart,
+		ID:           id,
+		Name:         name,
+		Directory:    directory,
+		Port:         port,
+		Password:     password,
+		Status:       string(StatusStopped),
+		AutoStart:    autoStart,
+		ProviderType: string(providerType),
 	}); err != nil {
-		m.portPool.Release(port)
+		if providerType == provider.TypeOpenCode {
+			m.portPool.Release(port)
+		}
 		return nil, fmt.Errorf("saving instance: %w", err)
 	}
 
@@ -95,6 +112,15 @@ func (m *Manager) CreateAndStart(name, directory string, autoStart bool) (*Insta
 	return inst, nil
 }
 
+func (m *Manager) createProvider(provType provider.Type, dir string, port int, password, instanceID string) provider.Provider {
+	switch provType {
+	case provider.TypeClaudeCode:
+		return provider.NewClaudeCodeProvider(m.claudeBinary, dir, m.store, instanceID)
+	default:
+		return provider.NewOpenCodeProvider(m.opencodeBinary, dir, port, password)
+	}
+}
+
 func (m *Manager) StartInstance(id string) error {
 	m.mu.RLock()
 	inst, ok := m.instances[id]
@@ -104,48 +130,66 @@ func (m *Manager) StartInstance(id string) error {
 		return fmt.Errorf("instance %s not found", id)
 	}
 
-	// Reallocate port if needed
-	if inst.Status() == StatusStopped {
+	if inst.ProviderType == provider.TypeOpenCode {
 		port, err := m.portPool.Allocate()
 		if err != nil {
 			return err
 		}
 		inst.Port = port
 		_ = m.store.UpdateInstancePort(id, port)
+		if ocp, ok := inst.Provider.(*provider.OpenCodeProvider); ok {
+			ocp.SetPort(port)
+		}
 	}
 
 	return m.startInstance(inst)
 }
 
 func (m *Manager) startInstance(inst *Instance) error {
-	if err := inst.Start(m.ctx, m.binary); err != nil {
+	inst.SetStatus(StatusStarting)
+
+	if err := inst.Provider.Start(m.ctx); err != nil {
+		inst.SetStatus(StatusFailed)
 		return err
 	}
 
+	inst.SetStatus(StatusRunning)
 	_ = m.store.UpdateInstanceStatus(inst.ID, string(StatusRunning))
 
-	// Monitor for crashes
-	go m.watchInstance(inst, 0)
+	// For OpenCode: wait for ready and watch for crashes
+	if ocp, ok := inst.Provider.(*provider.OpenCodeProvider); ok {
+		go func() {
+			slog.Info("waiting for instance to be ready", "name", inst.Name)
+			if err := ocp.WaitReady(m.ctx, 60*time.Second); err != nil {
+				if m.ctx.Err() == nil {
+					slog.Error("instance not ready", "name", inst.Name, "error", err)
+				}
+				return
+			}
+			slog.Info("instance ready", "name", inst.Name)
+		}()
+
+		go m.watchOpenCodeInstance(inst, ocp, 0)
+	}
 
 	return nil
 }
 
-func (m *Manager) watchInstance(inst *Instance, restartCount int) {
-	err := inst.Wait()
+func (m *Manager) watchOpenCodeInstance(inst *Instance, ocp *provider.OpenCodeProvider, restartCount int) {
+	err := ocp.Wait()
 	if err == nil {
-		return // Graceful shutdown
+		return
 	}
 
-	// Check if context was cancelled (intentional stop)
 	if m.ctx.Err() != nil {
 		return
 	}
 
 	if inst.Status() == StatusStopped {
-		return // Was stopped intentionally
+		return
 	}
 
-	slog.Error("instance crashed", "name", inst.Name, "error", err, "restarts", restartCount, "stderr", inst.Stderr())
+	slog.Error("instance crashed", "name", inst.Name, "error", err, "restarts", restartCount, "stderr", ocp.Stderr())
 	inst.SetStatus(StatusFailed)
 	_ = m.store.UpdateInstanceStatus(inst.ID, string(StatusFailed))
 
@@ -158,7 +202,6 @@ func (m *Manager) watchInstance(inst *Instance, restartCount int) {
 		return
 	}
 
-	// Exponential backoff
 	delay := time.Duration(1<<uint(restartCount)) * time.Second
 	slog.Info("restarting instance", "name", inst.Name, "delay", delay)
 
@@ -168,20 +211,20 @@ func (m *Manager) watchInstance(inst *Instance, restartCount int) {
 		return
 	}
 
-	// Reallocate port for restart
 	m.portPool.Release(inst.Port)
 	port, err2 := m.portPool.Allocate()
 	if err2 != nil {
 		slog.Error("failed to allocate port for restart", "name", inst.Name, "error", err2)
 		if m.onCrash != nil {
-			m.onCrash(inst, fmt.Errorf("port allocation failed during restart: %w", err2))
+			m.onCrash(inst, fmt.Errorf("port allocation failed: %w", err2))
 		}
 		return
 	}
 	inst.Port = port
+	ocp.SetPort(port)
 	_ = m.store.UpdateInstancePort(inst.ID, port)
 
-	if err := inst.Start(m.ctx, m.binary); err != nil {
+	if err := inst.Provider.Start(m.ctx); err != nil {
 		slog.Error("failed to restart instance", "name", inst.Name, "error", err)
 		if m.onCrash != nil {
 			m.onCrash(inst, fmt.Errorf("restart failed: %w", err))
@@ -190,8 +233,17 @@ func (m *Manager) watchInstance(inst *Instance, restartCount int) {
 		return
 	}
 
+	inst.SetStatus(StatusRunning)
 	_ = m.store.UpdateInstanceStatus(inst.ID, string(StatusRunning))
-	go m.watchInstance(inst, restartCount+1)
+
+	// Wait for ready again
+	go func() {
+		if err := ocp.WaitReady(m.ctx, 60*time.Second); err != nil && m.ctx.Err() == nil {
+			slog.Error("restarted instance not ready", "name", inst.Name, "error", err)
+		}
+	}()
+
+	go m.watchOpenCodeInstance(inst, ocp, restartCount+1)
 }
 
 func (m *Manager) StopInstance(id string) error {
@@ -203,11 +255,15 @@ func (m *Manager) StopInstance(id string) error {
 		return fmt.Errorf("instance %s not found", id)
 	}
 
-	if err := inst.Stop(); err != nil {
+	inst.SetStatus(StatusStopped)
+
+	if err := inst.Provider.Stop(); err != nil {
 		return err
 	}
 
-	m.portPool.Release(inst.Port)
+	if inst.ProviderType == provider.TypeOpenCode {
+		m.portPool.Release(inst.Port)
+	}
 	_ = m.store.UpdateInstanceStatus(id, string(StatusStopped))
 	return nil
 }
@@ -221,8 +277,10 @@ func (m *Manager) DeleteInstance(id string) error {
 	m.mu.Unlock()
 
 	if ok && inst.Status() == StatusRunning {
-		_ = inst.Stop()
-		m.portPool.Release(inst.Port)
+		_ = inst.Provider.Stop()
+		if inst.ProviderType == provider.TypeOpenCode {
+			m.portPool.Release(inst.Port)
+		}
 	}
 
 	return m.store.DeleteInstance(id)
@@ -255,22 +313,6 @@ func (m *Manager) ListInstances() []*Instance {
 	return result
 }
 
-func (m *Manager) HealthCheck(inst *Instance) bool {
-	client := &http.Client{Timeout: 5 * time.Second}
-	req, err := http.NewRequest("GET", inst.BaseURL()+"/", nil)
-	if err != nil {
-		return false
-	}
-	req.SetBasicAuth("opencode", inst.Password)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
-}
-
 func (m *Manager) StartHealthChecks() {
 	if m.healthInterval <= 0 {
 		return
@@ -284,8 +326,8 @@ func (m *Manager) StartHealthChecks() {
 				m.mu.RLock()
 				for _, inst := range m.instances {
 					if inst.Status() == StatusRunning {
-						if !m.HealthCheck(inst) {
-							slog.Warn("health check failed", "name", inst.Name)
+						if err := inst.Provider.HealthCheck(m.ctx); err != nil {
+							slog.Warn("health check failed", "name", inst.Name, "error", err)
 						}
 					}
 				}
@@ -297,7 +339,6 @@ func (m *Manager) StartHealthChecks() {
 	}()
 }
 
-// RestoreInstances loads instances from DB and restarts those that should be running.
 func (m *Manager) RestoreInstances() error {
 	instances, err := m.store.GetRunningInstances()
 	if err != nil {
@@ -305,27 +346,35 @@ func (m *Manager) RestoreInstances() error {
 	}
 
 	for _, dbInst := range instances {
+		provType := provider.Type(dbInst.ProviderType)
+		var port int
+
+		if provType == provider.TypeOpenCode {
+			var err error
+			port, err = m.portPool.Allocate()
+			if err != nil {
+				slog.Error("failed to allocate port for restored instance", "name", dbInst.Name, "error", err)
+				continue
+			}
+			_ = m.store.UpdateInstancePort(dbInst.ID, port)
+		}
+
+		prov := m.createProvider(provType, dbInst.Directory, port, dbInst.Password, dbInst.ID)
+
 		inst := &Instance{
-			ID:        dbInst.ID,
-			Name:      dbInst.Name,
-			Directory: dbInst.Directory,
-			Port:      dbInst.Port,
-			Password:  dbInst.Password,
-			status:    StatusStopped,
+			ID:           dbInst.ID,
+			Name:         dbInst.Name,
+			Directory:    dbInst.Directory,
+			Port:         port,
+			Password:     dbInst.Password,
+			ProviderType: provType,
+			Provider:     prov,
+			status:       StatusStopped,
 		}
 
 		m.mu.Lock()
 		m.instances[inst.ID] = inst
 		m.mu.Unlock()
-
-		// Allocate a new port for restart
-		port, err := m.portPool.Allocate()
-		if err != nil {
-			slog.Error("failed to allocate port for restored instance", "name", inst.Name, "error", err)
-			continue
-		}
-		inst.Port = port
-		_ = m.store.UpdateInstancePort(inst.ID, port)
 
 		if err := m.startInstance(inst); err != nil {
 			slog.Error("failed to restore instance", "name", inst.Name, "error", err)
@@ -336,7 +385,6 @@ func (m *Manager) RestoreInstances() error {
 	return nil
 }
 
-// LoadStopped loads stopped instances from DB so they appear in list commands.
 func (m *Manager) LoadStopped() error {
 	all, err := m.store.ListInstances()
 	if err != nil {
@@ -350,13 +398,17 @@ func (m *Manager) LoadStopped() error {
 		if _, exists := m.instances[dbInst.ID]; exists {
 			continue
 		}
+		provType := provider.Type(dbInst.ProviderType)
+		prov := m.createProvider(provType, dbInst.Directory, dbInst.Port, dbInst.Password, dbInst.ID)
 		m.instances[dbInst.ID] = &Instance{
-			ID:        dbInst.ID,
-			Name:      dbInst.Name,
-			Directory: dbInst.Directory,
-			Port:      dbInst.Port,
-			Password:  dbInst.Password,
-			status:    InstanceStatus(dbInst.Status),
+			ID:           dbInst.ID,
+			Name:         dbInst.Name,
+			Directory:    dbInst.Directory,
+			Port:         dbInst.Port,
+			Password:     dbInst.Password,
+			ProviderType: provType,
+			Provider:     prov,
+			status:       InstanceStatus(dbInst.Status),
 		}
 	}
 	return nil
@@ -370,7 +422,7 @@ func (m *Manager) Shutdown() {
 
 	for _, inst := range m.instances {
 		if inst.Status() == StatusRunning {
-			_ = inst.Stop()
+			_ = inst.Provider.Stop()
 		}
 	}
 }

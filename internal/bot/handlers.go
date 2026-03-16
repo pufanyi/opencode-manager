@@ -2,32 +2,28 @@ package bot
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
-	"github.com/pufanyi/opencode-manager/internal/opencode"
 	"github.com/pufanyi/opencode-manager/internal/process"
+	"github.com/pufanyi/opencode-manager/internal/provider"
 	"github.com/pufanyi/opencode-manager/internal/store"
 )
 
 type Handlers struct {
-	procMgr       *process.Manager
-	store         *store.Store
-	streamMgr     *StreamManager
-	sseSubscribers map[string]context.CancelFunc // instance ID -> SSE cancel
+	procMgr   *process.Manager
+	store     *store.Store
+	streamMgr *StreamManager
 }
 
 func NewHandlers(procMgr *process.Manager, st *store.Store, streamMgr *StreamManager) *Handlers {
 	return &Handlers{
-		procMgr:        procMgr,
-		store:          st,
-		streamMgr:      streamMgr,
-		sseSubscribers: make(map[string]context.CancelFunc),
+		procMgr:   procMgr,
+		store:     st,
+		streamMgr: streamMgr,
 	}
 }
 
@@ -35,7 +31,8 @@ func (h *Handlers) HandleStart(ctx context.Context, b *bot.Bot, update *models.U
 	text := `Welcome to *OpenCode Manager*!
 
 Commands:
-/new <name> <path> — Create & start a new instance
+/new <name> <path> — Create OpenCode instance
+/newclaude <name> <path> — Create Claude Code instance
 /list — List all instances
 /switch <name> — Switch active instance
 /stop [name] — Stop an instance
@@ -60,11 +57,19 @@ func (h *Handlers) HandleHelp(ctx context.Context, b *bot.Bot, update *models.Up
 }
 
 func (h *Handlers) HandleNew(ctx context.Context, b *bot.Bot, update *models.Update) {
+	h.handleNewInstance(ctx, b, update, provider.TypeOpenCode)
+}
+
+func (h *Handlers) HandleNewClaude(ctx context.Context, b *bot.Bot, update *models.Update) {
+	h.handleNewInstance(ctx, b, update, provider.TypeClaudeCode)
+}
+
+func (h *Handlers) handleNewInstance(ctx context.Context, b *bot.Bot, update *models.Update, provType provider.Type) {
 	parts := strings.Fields(update.Message.Text)
 	if len(parts) < 3 {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
-			Text:   "Usage: /new <name> <path>",
+			Text:   fmt.Sprintf("Usage: /%s <name> <path>", parts[0][1:]),
 		})
 		return
 	}
@@ -72,7 +77,6 @@ func (h *Handlers) HandleNew(ctx context.Context, b *bot.Bot, update *models.Upd
 	name := parts[1]
 	dir := strings.Join(parts[2:], " ")
 
-	// Check if name already exists
 	if inst := h.procMgr.GetInstanceByName(name); inst != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
@@ -81,7 +85,7 @@ func (h *Handlers) HandleNew(ctx context.Context, b *bot.Bot, update *models.Upd
 		return
 	}
 
-	inst, err := h.procMgr.CreateAndStart(name, dir, false)
+	inst, err := h.procMgr.CreateAndStart(name, dir, false, provType)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
@@ -90,49 +94,64 @@ func (h *Handlers) HandleNew(ctx context.Context, b *bot.Bot, update *models.Upd
 		return
 	}
 
-	// Auto-switch to new instance
 	userID := update.Message.From.ID
 	_ = h.store.SetActiveInstance(userID, inst.ID)
 
-	// Start SSE listener for this instance
-	h.startSSEListener(inst)
+	label := "OpenCode"
+	if provType == provider.TypeClaudeCode {
+		label = "Claude Code"
+	}
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: update.Message.Chat.ID,
-		Text:   fmt.Sprintf("Instance *%s* created and started on port %d.\nSwitched to this instance.", escapeMarkdown(name), inst.Port),
-		ParseMode: models.ParseModeMarkdown,
+		ChatID:      update.Message.Chat.ID,
+		Text:        fmt.Sprintf("%s instance *%s* created.\nSwitched to this instance.", label, escapeMarkdown(name)),
+		ParseMode:   models.ParseModeMarkdown,
 		ReplyMarkup: instanceActionsKeyboard(inst),
 	})
 }
 
 func (h *Handlers) HandleList(ctx context.Context, b *bot.Bot, update *models.Update) {
+	slog.Info("HandleList called", "user", update.Message.From.ID)
 	instances := h.procMgr.ListInstances()
+	slog.Info("instances found", "count", len(instances))
+
 	if len(instances) == 0 {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
-			Text:   "No instances. Use /new <name> <path> to create one.",
+			Text:   "No instances. Use /new or /newclaude to create one.",
 		})
 		return
 	}
 
 	var sb strings.Builder
-	sb.WriteString("*Instances:*\n\n")
+	sb.WriteString("Instances:\n\n")
 	for _, inst := range instances {
 		status := "stopped"
+		icon := "🔴"
 		if inst.Status() == process.StatusRunning {
 			status = "running"
+			icon = "🟢"
+		} else if inst.Status() == process.StatusStarting {
+			status = "starting"
+			icon = "🟡"
 		} else if inst.Status() == process.StatusFailed {
 			status = "failed"
 		}
-		sb.WriteString(fmt.Sprintf("• *%s* — %s (`%s`)\n", escapeMarkdown(inst.Name), status, inst.Directory))
+		provLabel := "OC"
+		if inst.ProviderType == provider.TypeClaudeCode {
+			provLabel = "CC"
+		}
+		sb.WriteString(fmt.Sprintf("%s [%s] %s — %s\n   %s\n", icon, provLabel, inst.Name, status, inst.Directory))
 	}
 
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      update.Message.Chat.ID,
 		Text:        sb.String(),
-		ParseMode:   models.ParseModeMarkdown,
 		ReplyMarkup: instanceListKeyboard(instances),
 	})
+	if err != nil {
+		slog.Error("failed to send list", "error", err)
+	}
 }
 
 func (h *Handlers) HandleSwitch(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -155,8 +174,7 @@ func (h *Handlers) HandleSwitch(ctx context.Context, b *bot.Bot, update *models.
 		return
 	}
 
-	userID := update.Message.From.ID
-	_ = h.store.SetActiveInstance(userID, inst.ID)
+	_ = h.store.SetActiveInstance(update.Message.From.ID, inst.ID)
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
@@ -172,10 +190,8 @@ func (h *Handlers) HandleStop(ctx context.Context, b *bot.Bot, update *models.Up
 	var inst *process.Instance
 
 	if len(parts) >= 2 {
-		name := parts[1]
-		inst = h.procMgr.GetInstanceByName(name)
+		inst = h.procMgr.GetInstanceByName(parts[1])
 	} else {
-		// Stop active instance
 		state, _ := h.store.GetUserState(userID)
 		if state != nil && state.ActiveInstanceID != "" {
 			inst = h.procMgr.GetInstance(state.ActiveInstanceID)
@@ -190,12 +206,6 @@ func (h *Handlers) HandleStop(ctx context.Context, b *bot.Bot, update *models.Up
 		return
 	}
 
-	// Cancel SSE subscriber
-	if cancel, ok := h.sseSubscribers[inst.ID]; ok {
-		cancel()
-		delete(h.sseSubscribers, inst.ID)
-	}
-
 	if err := h.procMgr.StopInstance(inst.ID); err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
@@ -204,7 +214,6 @@ func (h *Handlers) HandleStop(ctx context.Context, b *bot.Bot, update *models.Up
 		return
 	}
 
-	// Clear user state if this was their active instance
 	_ = h.store.ClearUserState(userID, inst.ID)
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
@@ -250,9 +259,6 @@ func (h *Handlers) HandleStartInst(ctx context.Context, b *bot.Bot, update *mode
 		return
 	}
 
-	// Start SSE listener
-	h.startSSEListener(inst)
-
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
 		Text:      fmt.Sprintf("Instance *%s* started.", escapeMarkdown(inst.Name)),
@@ -281,14 +287,18 @@ func (h *Handlers) HandleStatus(ctx context.Context, b *bot.Bot, update *models.
 		return
 	}
 
-	status := string(inst.Status())
+	provLabel := "OpenCode"
+	if inst.ProviderType == provider.TypeClaudeCode {
+		provLabel = "Claude Code"
+	}
+
 	sessionInfo := "none"
 	if state.ActiveSessionID != "" {
 		sessionInfo = state.ActiveSessionID
 	}
 
-	text := fmt.Sprintf("*Active Instance:* %s\n*Status:* %s\n*Directory:* `%s`\n*Port:* %d\n*Session:* %s",
-		escapeMarkdown(inst.Name), status, inst.Directory, inst.Port, sessionInfo)
+	text := fmt.Sprintf("*Active Instance:* %s\n*Provider:* %s\n*Status:* %s\n*Directory:* `%s`\n*Session:* %s",
+		escapeMarkdown(inst.Name), provLabel, string(inst.Status()), inst.Directory, sessionInfo)
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
@@ -299,19 +309,16 @@ func (h *Handlers) HandleStatus(ctx context.Context, b *bot.Bot, update *models.
 
 func (h *Handlers) HandleSession(ctx context.Context, b *bot.Bot, update *models.Update) {
 	userID := update.Message.From.ID
-	inst, client, err := h.getActiveClient(userID)
+	inst, err := h.getActiveInstance(userID)
 	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   err.Error(),
-		})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: err.Error()})
 		return
 	}
 
 	parts := strings.Fields(update.Message.Text)
 
 	if len(parts) >= 2 && parts[1] == "new" {
-		session, err := client.CreateSession()
+		session, err := inst.Provider.CreateSession(ctx)
 		if err != nil {
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: update.Message.Chat.ID,
@@ -330,18 +337,17 @@ func (h *Handlers) HandleSession(ctx context.Context, b *bot.Bot, update *models
 		return
 	}
 
-	// Show current session
 	state, _ := h.store.GetUserState(userID)
 	if state.ActiveSessionID == "" {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "No active session. Use `/session new` to create one.",
+			ChatID:    update.Message.Chat.ID,
+			Text:      "No active session. Use `/session new` to create one.",
 			ParseMode: models.ParseModeMarkdown,
 		})
 		return
 	}
 
-	session, err := client.GetSession(state.ActiveSessionID)
+	session, err := inst.Provider.GetSession(ctx, state.ActiveSessionID)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
@@ -364,16 +370,13 @@ func (h *Handlers) HandleSession(ctx context.Context, b *bot.Bot, update *models
 
 func (h *Handlers) HandleSessions(ctx context.Context, b *bot.Bot, update *models.Update) {
 	userID := update.Message.From.ID
-	inst, client, err := h.getActiveClient(userID)
+	inst, err := h.getActiveInstance(userID)
 	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   err.Error(),
-		})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: err.Error()})
 		return
 	}
 
-	sessions, err := client.ListSessions()
+	sessions, err := inst.Provider.ListSessions(ctx)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
@@ -384,8 +387,8 @@ func (h *Handlers) HandleSessions(ctx context.Context, b *bot.Bot, update *model
 
 	if len(sessions) == 0 {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   fmt.Sprintf("*[%s]* No sessions. Use `/session new` to create one.", escapeMarkdown(inst.Name)),
+			ChatID:    update.Message.Chat.ID,
+			Text:      fmt.Sprintf("*[%s]* No sessions. Use `/session new` to create one.", escapeMarkdown(inst.Name)),
 			ParseMode: models.ParseModeMarkdown,
 		})
 		return
@@ -406,25 +409,19 @@ func (h *Handlers) HandleSessions(ctx context.Context, b *bot.Bot, update *model
 
 func (h *Handlers) HandleAbort(ctx context.Context, b *bot.Bot, update *models.Update) {
 	userID := update.Message.From.ID
-	inst, client, err := h.getActiveClient(userID)
+	inst, err := h.getActiveInstance(userID)
 	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   err.Error(),
-		})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: err.Error()})
 		return
 	}
 
 	state, _ := h.store.GetUserState(userID)
 	if state.ActiveSessionID == "" {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "No active session.",
-		})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: "No active session."})
 		return
 	}
 
-	if err := client.Abort(state.ActiveSessionID); err != nil {
+	if err := inst.Provider.Abort(ctx, state.ActiveSessionID); err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
 			Text:   fmt.Sprintf("Failed to abort: %s", err),
@@ -432,7 +429,6 @@ func (h *Handlers) HandleAbort(ctx context.Context, b *bot.Bot, update *models.U
 		return
 	}
 
-	// Stop the stream
 	h.streamMgr.RemoveStream(state.ActiveSessionID)
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
@@ -446,12 +442,9 @@ func (h *Handlers) HandlePrompt(ctx context.Context, b *bot.Bot, update *models.
 	userID := update.Message.From.ID
 	text := update.Message.Text
 
-	inst, client, err := h.getActiveClient(userID)
+	inst, err := h.getActiveInstance(userID)
 	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   err.Error(),
-		})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: err.Error()})
 		return
 	}
 
@@ -459,7 +452,7 @@ func (h *Handlers) HandlePrompt(ctx context.Context, b *bot.Bot, update *models.
 
 	// Auto-create session if none exists
 	if state.ActiveSessionID == "" {
-		session, err := client.CreateSession()
+		session, err := inst.Provider.CreateSession(ctx)
 		if err != nil {
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: update.Message.Chat.ID,
@@ -471,7 +464,7 @@ func (h *Handlers) HandlePrompt(ctx context.Context, b *bot.Bot, update *models.
 		state.ActiveSessionID = session.ID
 	}
 
-	// Send placeholder message
+	// Send placeholder
 	placeholder, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
 		Text:      fmt.Sprintf("*[%s]* _Thinking..._", escapeMarkdown(inst.Name)),
@@ -482,104 +475,45 @@ func (h *Handlers) HandlePrompt(ctx context.Context, b *bot.Bot, update *models.
 		return
 	}
 
-	// Start stream context
-	sc := h.streamMgr.StartStream(b, update.Message.Chat.ID, placeholder.ID, state.ActiveSessionID, inst.Name)
-
-	// Register SSE handler for this stream
-	_ = sc // SSE handlers are set up in startSSEListener
-
-	// Fire prompt
-	if err := client.PromptAsync(state.ActiveSessionID, text); err != nil {
+	// Start prompt via provider
+	promptCtx, promptCancel := context.WithCancel(context.Background())
+	ch, err := inst.Provider.Prompt(promptCtx, state.ActiveSessionID, text)
+	if err != nil {
+		promptCancel()
 		_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    update.Message.Chat.ID,
 			MessageID: placeholder.ID,
 			Text:      fmt.Sprintf("*[%s]* Failed to send prompt: %s", escapeMarkdown(inst.Name), err),
 			ParseMode: models.ParseModeMarkdown,
 		})
-		h.streamMgr.RemoveStream(state.ActiveSessionID)
 		return
 	}
+
+	// Wire up streaming
+	sc := h.streamMgr.StartStream(b, update.Message.Chat.ID, placeholder.ID, state.ActiveSessionID, inst.Name, ch)
+	_ = sc
+	_ = promptCancel // cancel is held by the stream context
 }
 
-// getActiveClient returns the active instance and its HTTP client for a user.
-func (h *Handlers) getActiveClient(userID int64) (*process.Instance, *opencode.Client, error) {
+// getActiveInstance returns the active instance for a user.
+func (h *Handlers) getActiveInstance(userID int64) (*process.Instance, error) {
 	state, err := h.store.GetUserState(userID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get user state: %s", err)
+		return nil, fmt.Errorf("failed to get user state: %s", err)
 	}
 
 	if state.ActiveInstanceID == "" {
-		return nil, nil, fmt.Errorf("no active instance. Use /list to select one")
+		return nil, fmt.Errorf("no active instance. Use /list to select one")
 	}
 
 	inst := h.procMgr.GetInstance(state.ActiveInstanceID)
 	if inst == nil {
-		return nil, nil, fmt.Errorf("active instance not found. Use /list to select another")
+		return nil, fmt.Errorf("active instance not found. Use /list to select another")
 	}
 
 	if inst.Status() != process.StatusRunning {
-		return nil, nil, fmt.Errorf("instance '%s' is not running. Use /start_inst %s", inst.Name, inst.Name)
+		return nil, fmt.Errorf("instance '%s' is not running. Use /start_inst %s", inst.Name, inst.Name)
 	}
 
-	client := opencode.NewClient(inst.BaseURL(), inst.Password)
-	return inst, client, nil
-}
-
-func (h *Handlers) startSSEListener(inst *process.Instance) {
-	// Cancel existing listener
-	if cancel, ok := h.sseSubscribers[inst.ID]; ok {
-		cancel()
-	}
-
-	client := opencode.NewClient(inst.BaseURL(), inst.Password)
-	subscriber := opencode.NewSSESubscriber(client)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	h.sseSubscribers[inst.ID] = cancel
-
-	// Register wildcard handler that routes to active streams
-	subscriber.On("*", func(eventType string, data json.RawMessage) {
-		// Try to extract sessionID from the event to find the right stream
-		var msg opencode.Message
-		if err := json.Unmarshal(data, &msg); err != nil {
-			return
-		}
-
-		if sc := h.streamMgr.GetStream(msg.SessionID); sc != nil {
-			sc.HandleSSEEvent(eventType, data)
-		}
-	})
-
-	go func() {
-		// Wait for instance to be ready before starting SSE
-		slog.Info("waiting for instance to be ready", "name", inst.Name)
-		if err := subscriber.WaitReady(ctx, 60*time.Second); err != nil {
-			if ctx.Err() == nil {
-				slog.Error("instance not ready, giving up SSE", "name", inst.Name, "error", err)
-			}
-			return
-		}
-		slog.Info("instance ready, starting SSE", "name", inst.Name)
-
-		if err := subscriber.Subscribe(ctx); err != nil && ctx.Err() == nil {
-			slog.Error("SSE subscriber failed", "instance", inst.Name, "error", err)
-		}
-	}()
-}
-
-// StartSSEForRunning starts SSE listeners for all running instances.
-func (h *Handlers) StartSSEForRunning() {
-	for _, inst := range h.procMgr.ListInstances() {
-		if inst.Status() == process.StatusRunning {
-			h.startSSEListener(inst)
-		}
-	}
-}
-
-// StopAllSSE cancels all SSE subscribers.
-func (h *Handlers) StopAllSSE() {
-	for id, cancel := range h.sseSubscribers {
-		cancel()
-		delete(h.sseSubscribers, id)
-	}
+	return inst, nil
 }

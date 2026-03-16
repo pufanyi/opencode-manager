@@ -25,6 +25,7 @@ const (
 
 func Run(outputPath string) error {
 	reader := bufio.NewReader(os.Stdin)
+	stepNum = 0
 
 	printBanner()
 
@@ -41,24 +42,30 @@ func Run(outputPath string) error {
 	}
 
 	// Step 3: OpenCode Binary
-	binary, err := stepBinary(reader)
+	binary, err := stepBinary(reader, "opencode", "OpenCode")
 	if err != nil {
 		return err
 	}
 
-	// Step 4: Port Range
+	// Step 4: Claude Code Binary
+	claudeBinary, err := stepBinary(reader, "claude", "Claude Code")
+	if err != nil {
+		return err
+	}
+
+	// Step 5: Port Range
 	portStart, portEnd, err := stepPorts(reader)
 	if err != nil {
 		return err
 	}
 
-	// Step 5: Database Path
+	// Step 6: Database Path
 	dbPath, err := stepDatabase(reader)
 	if err != nil {
 		return err
 	}
 
-	// Step 6: Projects
+	// Step 7: Projects
 	projects, err := stepProjects(reader)
 	if err != nil {
 		return err
@@ -83,13 +90,14 @@ func Run(outputPath string) error {
 
 	// Write config from template
 	data := configData{
-		Token:     token,
-		Users:     users,
-		Binary:    binary,
-		PortStart: portStart,
-		PortEnd:   portEnd,
-		DBPath:    dbPath,
-		Projects:  projects,
+		Token:        token,
+		Users:        users,
+		Binary:       binary,
+		ClaudeBinary: claudeBinary,
+		PortStart:    portStart,
+		PortEnd:      portEnd,
+		DBPath:       dbPath,
+		Projects:     projects,
 	}
 	if err := writeConfig(outputPath, data); err != nil {
 		return err
@@ -102,7 +110,8 @@ func Run(outputPath string) error {
 // ── Steps ──────────────────────────────────────────────────────────────────
 
 func stepToken(r *bufio.Reader) (string, error) {
-	printStep(1, 6, "Telegram Bot Token")
+	stepNum++
+	printStep(stepNum, 7, "Telegram Bot Token")
 	hint("Create a bot via @BotFather on Telegram to get your token.")
 
 	for {
@@ -118,7 +127,8 @@ func stepToken(r *bufio.Reader) (string, error) {
 }
 
 func stepUsers(r *bufio.Reader) ([]int64, error) {
-	printStep(2, 6, "Allowed Telegram User IDs")
+	stepNum++
+	printStep(stepNum, 7, "Allowed Telegram User IDs")
 	hint("Send /start to @userinfobot on Telegram to find your user ID.")
 
 	var users []int64
@@ -143,16 +153,19 @@ func stepUsers(r *bufio.Reader) ([]int64, error) {
 	return users, nil
 }
 
-func stepBinary(r *bufio.Reader) (string, error) {
-	printStep(3, 6, "OpenCode Binary Path")
+var stepNum int
+
+func stepBinary(r *bufio.Reader, defaultName, label string) (string, error) {
+	stepNum++
+	printStep(stepNum, 7, label+" Binary Path")
 
 	detected := ""
-	if p, err := exec.LookPath("opencode"); err == nil {
+	if p, err := exec.LookPath(defaultName); err == nil {
 		detected = p
 		printOK("Detected: %s", detected)
 	}
 
-	def := "opencode"
+	def := defaultName
 	if detected != "" {
 		def = detected
 	}
@@ -174,7 +187,8 @@ func stepBinary(r *bufio.Reader) (string, error) {
 }
 
 func stepPorts(r *bufio.Reader) (int, int, error) {
-	printStep(4, 6, "Port Range")
+	stepNum++
+	printStep(stepNum, 7, "Port Range")
 	hint("Range of ports for OpenCode instances (1 port per instance).")
 
 	startStr := prompt(r, "  Start port [14096]: ")
@@ -204,7 +218,8 @@ func stepPorts(r *bufio.Reader) (int, int, error) {
 }
 
 func stepDatabase(r *bufio.Reader) (string, error) {
-	printStep(5, 6, "Database Path")
+	stepNum++
+	printStep(stepNum, 7, "Database Path")
 
 	val := prompt(r, "  SQLite database path [./data/opencode-manager.db]: ")
 	if val == "" {
@@ -221,7 +236,8 @@ func stepDatabase(r *bufio.Reader) (string, error) {
 }
 
 func stepProjects(r *bufio.Reader) ([]config.ProjectConfig, error) {
-	printStep(6, 6, "Pre-register Projects (optional)")
+	stepNum++
+	printStep(stepNum, 7, "Pre-register Projects (optional)")
 	hint("Add projects to auto-manage. Leave name empty to skip/finish.")
 
 	var projects []config.ProjectConfig
@@ -256,6 +272,12 @@ func stepProjects(r *bufio.Reader) ([]config.ProjectConfig, error) {
 			printOK("Resolved: %s", dir)
 		}
 
+		provStr := prompt(r, "  Provider (opencode/claudecode) [opencode]: ")
+		prov := "opencode"
+		if strings.HasPrefix(strings.ToLower(provStr), "c") {
+			prov = "claudecode"
+		}
+
 		autoStr := prompt(r, "  Auto-start on boot? [y/N]: ")
 		autoStart := strings.HasPrefix(strings.ToLower(autoStr), "y")
 
@@ -263,6 +285,7 @@ func stepProjects(r *bufio.Reader) ([]config.ProjectConfig, error) {
 			Name:      name,
 			Directory: dir,
 			AutoStart: autoStart,
+			Provider:  prov,
 		})
 		printOK("Added project '%s'", name)
 		fmt.Println()
@@ -329,13 +352,14 @@ func printDone(cfgPath string) {
 // ── Config template ────────────────────────────────────────────────────────
 
 type configData struct {
-	Token     string
-	Users     []int64
-	Binary    string
-	PortStart int
-	PortEnd   int
-	DBPath    string
-	Projects  []config.ProjectConfig
+	Token        string
+	Users        []int64
+	Binary       string
+	ClaudeBinary string
+	PortStart    int
+	PortEnd      int
+	DBPath       string
+	Projects     []config.ProjectConfig
 }
 
 var configTmpl = template.Must(template.New("config").Parse(`telegram:
@@ -344,6 +368,7 @@ var configTmpl = template.Must(template.New("config").Parse(`telegram:
 
 process:
   opencode_binary: "{{ .Binary }}"
+  claudecode_binary: "{{ .ClaudeBinary }}"
   port_range:
     start: {{ .PortStart }}
     end: {{ .PortEnd }}
@@ -353,6 +378,7 @@ process:
 projects:{{ range .Projects }}
   - name: "{{ .Name }}"
     directory: "{{ .Directory }}"
+    provider: "{{ .Provider }}"
     auto_start: {{ .AutoStart }}{{ end }}
 {{ else }}
 projects: []

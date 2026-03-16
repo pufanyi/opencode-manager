@@ -29,7 +29,6 @@ func New(cfg *config.TelegramConfig, procMgr *process.Manager, st *store.Store) 
 
 	opts := []bot.Option{
 		bot.WithDefaultHandler(func(ctx context.Context, b *bot.Bot, update *models.Update) {
-			// Handle callback queries
 			if update.CallbackQuery != nil {
 				if !allowedUsers[update.CallbackQuery.From.ID] {
 					return
@@ -38,11 +37,11 @@ func New(cfg *config.TelegramConfig, procMgr *process.Manager, st *store.Store) 
 				return
 			}
 
-			// Handle text messages as prompts
 			if update.Message != nil && update.Message.Text != "" {
 				if !allowedUsers[update.Message.From.ID] {
 					return
 				}
+				slog.Info("default handler: treating as prompt", "text", update.Message.Text)
 				handlers.HandlePrompt(ctx, b, update)
 			}
 		}),
@@ -53,7 +52,6 @@ func New(cfg *config.TelegramConfig, procMgr *process.Manager, st *store.Store) 
 		return nil, err
 	}
 
-	// Auth middleware
 	authMiddleware := func(next bot.HandlerFunc) bot.HandlerFunc {
 		return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 			if update.Message != nil && !allowedUsers[update.Message.From.ID] {
@@ -64,10 +62,10 @@ func New(cfg *config.TelegramConfig, procMgr *process.Manager, st *store.Store) 
 		}
 	}
 
-	// Register command handlers
 	b.RegisterHandlerMatchFunc(matchCommand("/start"), authMiddleware(handlers.HandleStart))
 	b.RegisterHandlerMatchFunc(matchCommand("/help"), authMiddleware(handlers.HandleHelp))
 	b.RegisterHandlerMatchFunc(matchCommand("/new"), authMiddleware(handlers.HandleNew))
+	b.RegisterHandlerMatchFunc(matchCommand("/newclaude"), authMiddleware(handlers.HandleNewClaude))
 	b.RegisterHandlerMatchFunc(matchCommand("/list"), authMiddleware(handlers.HandleList))
 	b.RegisterHandlerMatchFunc(matchCommand("/switch"), authMiddleware(handlers.HandleSwitch))
 	b.RegisterHandlerMatchFunc(matchCommand("/stop"), authMiddleware(handlers.HandleStop))
@@ -85,13 +83,11 @@ func New(cfg *config.TelegramConfig, procMgr *process.Manager, st *store.Store) 
 }
 
 func (b *Bot) Start(ctx context.Context) {
-	b.handlers.StartSSEForRunning()
 	slog.Info("telegram bot starting")
 	b.bot.Start(ctx)
 }
 
 func (b *Bot) Stop() {
-	b.handlers.StopAllSSE()
 }
 
 func (b *Bot) SendMessage(ctx context.Context, chatID int64, text string) {
@@ -102,7 +98,6 @@ func (b *Bot) SendMessage(ctx context.Context, chatID int64, text string) {
 	})
 }
 
-// NotifyCrash sends a crash notification to all allowed users.
 func (b *Bot) NotifyCrash(instName string, err error) {
 	text := fmt.Sprintf("*Instance %s* crashed permanently: %s", escapeMarkdown(instName), err)
 	for _, userID := range b.cfg.AllowedUsers {
@@ -119,7 +114,6 @@ func matchCommand(cmd string) func(update *models.Update) bool {
 		if text == cmd {
 			return true
 		}
-		// Match "/cmd " (with arguments) or "/cmd@botname"
 		if len(text) > len(cmd) && text[:len(cmd)] == cmd {
 			next := text[len(cmd)]
 			return next == ' ' || next == '@'

@@ -24,6 +24,7 @@ type TelegramConfig struct {
 
 type ProcessConfig struct {
 	OpencodeBinary      string        `yaml:"opencode_binary"`
+	ClaudeCodeBinary    string        `yaml:"claudecode_binary"`
 	PortRange           PortRange     `yaml:"port_range"`
 	HealthCheckInterval time.Duration `yaml:"health_check_interval"`
 	MaxRestartAttempts  int           `yaml:"max_restart_attempts"`
@@ -38,6 +39,7 @@ type ProjectConfig struct {
 	Name      string `yaml:"name"`
 	Directory string `yaml:"directory"`
 	AutoStart bool   `yaml:"auto_start"`
+	Provider  string `yaml:"provider"` // "opencode" (default) or "claudecode"
 }
 
 type StorageConfig struct {
@@ -48,6 +50,7 @@ func Load(path string) (*Config, error) {
 	cfg := &Config{
 		Process: ProcessConfig{
 			OpencodeBinary:      "opencode",
+			ClaudeCodeBinary:    "claude",
 			PortRange:           PortRange{Start: 14096, End: 14196},
 			HealthCheckInterval: 30 * time.Second,
 			MaxRestartAttempts:  3,
@@ -93,6 +96,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("OPENCODE_BINARY"); v != "" {
 		cfg.Process.OpencodeBinary = v
+	}
+	if v := os.Getenv("CLAUDECODE_BINARY"); v != "" {
+		cfg.Process.ClaudeCodeBinary = v
 	}
 	if v := os.Getenv("STORAGE_DATABASE"); v != "" {
 		cfg.Storage.Database = v

@@ -2,7 +2,6 @@ package bot
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -11,47 +10,47 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
-	"github.com/pufanyi/opencode-manager/internal/opencode"
+	"github.com/pufanyi/opencode-manager/internal/provider"
 )
 
 const (
-	maxMessageLen    = 4096
-	fileFallbackLen  = 12000
-	editInterval     = 1500 * time.Millisecond
+	maxMessageLen   = 4096
+	fileFallbackLen = 12000
+	editInterval    = 1500 * time.Millisecond
 )
 
-// StreamContext manages streaming SSE events to a Telegram message.
+// StreamContext manages streaming provider events to a Telegram message.
 type StreamContext struct {
-	mu         sync.Mutex
-	b          *bot.Bot
-	chatID     int64
-	messageID  int
-	sessionID  string
+	mu           sync.Mutex
+	b            *bot.Bot
+	chatID       int64
+	messageID    int
+	sessionID    string
 	instanceName string
 
-	content    strings.Builder
-	dirty      bool
-	done       bool
-	messages   []int // IDs of continuation messages
-	cancel     context.CancelFunc
-	lastEdit   time.Time
+	content  strings.Builder
+	dirty    bool
+	done     bool
+	messages []int // IDs of continuation messages
+	cancel   context.CancelFunc
+	lastEdit time.Time
 }
 
 // StreamManager handles all active streams and global rate limiting.
 type StreamManager struct {
-	mu       sync.Mutex
-	streams  map[string]*StreamContext // keyed by sessionID
+	mu        sync.Mutex
+	streams   map[string]*StreamContext // keyed by sessionID
 	semaphore chan struct{}
 }
 
 func NewStreamManager() *StreamManager {
 	return &StreamManager{
 		streams:   make(map[string]*StreamContext),
-		semaphore: make(chan struct{}, 25), // Global rate limit
+		semaphore: make(chan struct{}, 25),
 	}
 }
 
-func (sm *StreamManager) StartStream(b *bot.Bot, chatID int64, messageID int, sessionID, instanceName string) *StreamContext {
+func (sm *StreamManager) StartStream(b *bot.Bot, chatID int64, messageID int, sessionID, instanceName string, ch <-chan provider.StreamEvent) *StreamContext {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	sc := &StreamContext{
@@ -65,23 +64,18 @@ func (sm *StreamManager) StartStream(b *bot.Bot, chatID int64, messageID int, se
 	}
 
 	sm.mu.Lock()
-	// Cancel existing stream for this session
 	if old, ok := sm.streams[sessionID]; ok {
 		old.cancel()
 	}
 	sm.streams[sessionID] = sc
 	sm.mu.Unlock()
 
-	// Start coalescing timer
+	// Consume events from provider channel
+	go sc.consumeStream(ctx, ch)
+	// Periodic flush to Telegram
 	go sc.editLoop(ctx, sm.semaphore)
 
 	return sc
-}
-
-func (sm *StreamManager) GetStream(sessionID string) *StreamContext {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	return sm.streams[sessionID]
 }
 
 func (sm *StreamManager) RemoveStream(sessionID string) {
@@ -93,37 +87,34 @@ func (sm *StreamManager) RemoveStream(sessionID string) {
 	sm.mu.Unlock()
 }
 
-// HandleSSEEvent processes an incoming SSE event for streaming to Telegram.
-func (sc *StreamContext) HandleSSEEvent(eventType string, data json.RawMessage) {
-	if eventType != opencode.EventMessageUpdated && eventType != opencode.EventMessageCreated {
-		return
-	}
+// consumeStream reads from the provider's event channel and accumulates content.
+func (sc *StreamContext) consumeStream(ctx context.Context, ch <-chan provider.StreamEvent) {
+	var textBuf strings.Builder
 
-	var msg opencode.Message
-	if err := json.Unmarshal(data, &msg); err != nil {
-		slog.Error("failed to unmarshal SSE message", "error", err)
-		return
-	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-ch:
+			if !ok {
+				sc.mu.Lock()
+				sc.done = true
+				sc.dirty = true
+				sc.mu.Unlock()
+				return
+			}
 
-	if msg.SessionID != sc.sessionID {
-		return
-	}
-
-	// Only process assistant messages
-	if msg.Role != "assistant" {
-		return
-	}
-
-	// Extract text from message parts
-	var text strings.Builder
-	for _, part := range msg.Parts {
-		switch part.Type {
-		case "text":
-			text.WriteString(part.Text)
-		case "tool-invocation":
-			if part.ToolName != "" {
+			sc.mu.Lock()
+			switch evt.Type {
+			case "text":
+				textBuf.Reset()
+				textBuf.WriteString(evt.Text)
+				sc.content.Reset()
+				sc.content.WriteString(evt.Text)
+				sc.dirty = true
+			case "tool_use":
 				icon := "🔧"
-				switch part.State {
+				switch evt.ToolState {
 				case "running", "pending":
 					icon = "⏳"
 				case "completed":
@@ -131,25 +122,24 @@ func (sc *StreamContext) HandleSSEEvent(eventType string, data json.RawMessage) 
 				case "error":
 					icon = "❌"
 				}
-				text.WriteString(fmt.Sprintf("\n%s `%s`", icon, part.ToolName))
+				// Append tool line after current text
+				current := sc.content.String()
+				sc.content.Reset()
+				sc.content.WriteString(current)
+				sc.content.WriteString(fmt.Sprintf("\n%s `%s`", icon, evt.ToolName))
+				sc.dirty = true
+			case "done":
+				sc.done = true
+				sc.dirty = true
+			case "error":
+				sc.content.Reset()
+				sc.content.WriteString(fmt.Sprintf("Error: %s", evt.Error))
+				sc.done = true
+				sc.dirty = true
 			}
+			sc.mu.Unlock()
 		}
 	}
-
-	if text.Len() == 0 {
-		return
-	}
-
-	sc.mu.Lock()
-	sc.content.Reset()
-	sc.content.WriteString(text.String())
-	sc.dirty = true
-
-	// Check if message is done (has timing info with finished > 0)
-	if msg.Time != nil && msg.Time.Finished > 0 {
-		sc.done = true
-	}
-	sc.mu.Unlock()
 }
 
 func (sc *StreamContext) editLoop(ctx context.Context, semaphore chan struct{}) {
@@ -159,7 +149,6 @@ func (sc *StreamContext) editLoop(ctx context.Context, semaphore chan struct{}) 
 	for {
 		select {
 		case <-ctx.Done():
-			// Final flush
 			sc.flush(semaphore, true)
 			return
 		case <-ticker.C:
@@ -192,28 +181,22 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 		return
 	}
 
-	// Add header
 	header := fmt.Sprintf("*[%s]*\n\n", escapeMarkdown(sc.instanceName))
-
 	fullContent := header + content
 
-	// If content is too long for Telegram, send as file
 	if len(fullContent) > fileFallbackLen {
 		sc.sendAsFile(content)
 		return
 	}
 
-	// Split if needed
 	if len(fullContent) > maxMessageLen {
 		sc.handleLongMessage(header, content, semaphore)
 		return
 	}
 
-	// Acquire semaphore for rate limiting
 	semaphore <- struct{}{}
 	defer func() { <-semaphore }()
 
-	// Determine which message to edit
 	sc.mu.Lock()
 	msgID := sc.messageID
 	if len(sc.messages) > 0 {
@@ -239,7 +222,6 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 }
 
 func (sc *StreamContext) handleLongMessage(header, content string, semaphore chan struct{}) {
-	// Finalize current message with truncated content
 	available := maxMessageLen - len(header) - 20
 	truncated := content[:available] + "\n..."
 
@@ -261,7 +243,6 @@ func (sc *StreamContext) handleLongMessage(header, content string, semaphore cha
 
 	<-semaphore
 
-	// Send continuation as new message
 	remaining := content[available:]
 	if len(remaining) > maxMessageLen-len(header) {
 		remaining = remaining[:maxMessageLen-len(header)-20] + "\n..."
@@ -289,21 +270,14 @@ func (sc *StreamContext) sendAsFile(content string) {
 	}
 
 	_, err := sc.b.SendDocument(context.Background(), &bot.SendDocumentParams{
-		ChatID:   sc.chatID,
-		Document: fileData,
-		Caption:  fmt.Sprintf("*[%s]* Response too long, sent as file.", escapeMarkdown(sc.instanceName)),
+		ChatID:    sc.chatID,
+		Document:  fileData,
+		Caption:   fmt.Sprintf("*[%s]* Response too long, sent as file.", escapeMarkdown(sc.instanceName)),
 		ParseMode: models.ParseModeMarkdown,
 	})
 	if err != nil {
 		slog.Error("failed to send file", "error", err)
 	}
-}
-
-func (sc *StreamContext) MarkDone() {
-	sc.mu.Lock()
-	sc.done = true
-	sc.dirty = true
-	sc.mu.Unlock()
 }
 
 func escapeMarkdown(s string) string {
