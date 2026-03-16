@@ -1,6 +1,7 @@
 package process
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -28,6 +29,16 @@ type Instance struct {
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
 	status InstanceStatus
+	stderr *bytes.Buffer
+}
+
+func (i *Instance) Stderr() string {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.stderr == nil {
+		return ""
+	}
+	return i.stderr.String()
 }
 
 func (i *Instance) Status() InstanceStatus {
@@ -59,6 +70,8 @@ func (i *Instance) Start(ctx context.Context, binary string) error {
 	cmdCtx, cancel := context.WithCancel(ctx)
 	i.cancel = cancel
 
+	var stderr bytes.Buffer
+
 	cmd := exec.CommandContext(cmdCtx, binary, "serve",
 		"--port", fmt.Sprintf("%d", i.Port),
 		"--hostname", "127.0.0.1",
@@ -67,8 +80,10 @@ func (i *Instance) Start(ctx context.Context, binary string) error {
 	cmd.Env = append(cmd.Environ(),
 		fmt.Sprintf("OPENCODE_SERVER_PASSWORD=%s", i.Password),
 	)
+	cmd.Stderr = &stderr
 
 	i.cmd = cmd
+	i.stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
 		i.status = StatusFailed

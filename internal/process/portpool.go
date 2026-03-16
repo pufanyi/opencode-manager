@@ -2,6 +2,7 @@ package process
 
 import (
 	"fmt"
+	"net"
 	"sync"
 )
 
@@ -25,7 +26,7 @@ func (p *PortPool) Allocate() (int, error) {
 	defer p.mu.Unlock()
 
 	for port := p.start; port < p.end; port++ {
-		if !p.used[port] {
+		if !p.used[port] && isPortFree(port) {
 			p.used[port] = true
 			return port, nil
 		}
@@ -43,4 +44,14 @@ func (p *PortPool) Reserve(port int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.used[port] = true
+}
+
+// isPortFree checks if a port is actually available by trying to listen on it.
+func isPortFree(port int) bool {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return false
+	}
+	ln.Close()
+	return true
 }

@@ -145,7 +145,7 @@ func (m *Manager) watchInstance(inst *Instance, restartCount int) {
 		return // Was stopped intentionally
 	}
 
-	slog.Error("instance crashed", "name", inst.Name, "error", err, "restarts", restartCount)
+	slog.Error("instance crashed", "name", inst.Name, "error", err, "restarts", restartCount, "stderr", inst.Stderr())
 	inst.SetStatus(StatusFailed)
 	_ = m.store.UpdateInstanceStatus(inst.ID, string(StatusFailed))
 
