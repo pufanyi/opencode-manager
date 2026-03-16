@@ -1,4 +1,5 @@
 /bin/
+/opencode-manager
 /data/
 *.db
 opencode-manager.yaml
