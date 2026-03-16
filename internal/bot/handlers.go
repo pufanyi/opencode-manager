@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -550,6 +551,16 @@ func (h *Handlers) startSSEListener(inst *process.Instance) {
 	})
 
 	go func() {
+		// Wait for instance to be ready before starting SSE
+		slog.Info("waiting for instance to be ready", "name", inst.Name)
+		if err := subscriber.WaitReady(ctx, 60*time.Second); err != nil {
+			if ctx.Err() == nil {
+				slog.Error("instance not ready, giving up SSE", "name", inst.Name, "error", err)
+			}
+			return
+		}
+		slog.Info("instance ready, starting SSE", "name", inst.Name)
+
 		if err := subscriber.Subscribe(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("SSE subscriber failed", "instance", inst.Name, "error", err)
 		}
