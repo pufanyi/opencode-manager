@@ -31,8 +31,8 @@ func (h *Handlers) HandleStart(ctx context.Context, b *bot.Bot, update *models.U
 	text := `Welcome to *OpenCode Manager*!
 
 Commands:
-/new <name> <path> — Create OpenCode instance
-/newclaude <name> <path> — Create Claude Code instance
+/new <name> <path> — Create instance (Claude Code)
+/newopencode <name> <path> — Create OpenCode instance
 /list — List all instances
 /switch <name> — Switch active instance
 /stop [name] — Stop an instance
@@ -57,11 +57,11 @@ func (h *Handlers) HandleHelp(ctx context.Context, b *bot.Bot, update *models.Up
 }
 
 func (h *Handlers) HandleNew(ctx context.Context, b *bot.Bot, update *models.Update) {
-	h.handleNewInstance(ctx, b, update, provider.TypeOpenCode)
+	h.handleNewInstance(ctx, b, update, provider.TypeClaudeCode)
 }
 
-func (h *Handlers) HandleNewClaude(ctx context.Context, b *bot.Bot, update *models.Update) {
-	h.handleNewInstance(ctx, b, update, provider.TypeClaudeCode)
+func (h *Handlers) HandleNewOpenCode(ctx context.Context, b *bot.Bot, update *models.Update) {
+	h.handleNewInstance(ctx, b, update, provider.TypeOpenCode)
 }
 
 func (h *Handlers) handleNewInstance(ctx context.Context, b *bot.Bot, update *models.Update, provType provider.Type) {

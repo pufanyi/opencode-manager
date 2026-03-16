@@ -23,7 +23,7 @@ const instanceCols = `id, name, directory, port, password, status, auto_start, p
 
 func (s *Store) CreateInstance(inst *Instance) error {
 	if inst.ProviderType == "" {
-		inst.ProviderType = "opencode"
+		inst.ProviderType = "claudecode"
 	}
 	_, err := s.db.Exec(
 		`INSERT INTO instances (id, name, directory, port, password, status, auto_start, provider_type)

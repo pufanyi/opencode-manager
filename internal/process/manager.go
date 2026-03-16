@@ -52,7 +52,7 @@ func (m *Manager) SetCrashCallback(cb CrashCallback) {
 
 func (m *Manager) CreateAndStart(name, directory string, autoStart bool, providerType provider.Type) (*Instance, error) {
 	if providerType == "" {
-		providerType = provider.TypeOpenCode
+		providerType = provider.TypeClaudeCode
 	}
 
 	id := uuid.New().String()

@@ -272,9 +272,9 @@ func stepProjects(r *bufio.Reader) ([]config.ProjectConfig, error) {
 			printOK("Resolved: %s", dir)
 		}
 
-		provStr := prompt(r, "  Provider (opencode/claudecode) [opencode]: ")
-		prov := "opencode"
-		if strings.HasPrefix(strings.ToLower(provStr), "c") {
+		provStr := prompt(r, "  Provider (claudecode/opencode) [claudecode]: ")
+		prov := "claudecode"
+		if strings.HasPrefix(strings.ToLower(provStr), "o") {
 			prov = "claudecode"
 		}
 

@@ -15,7 +15,7 @@ func (s *Store) migrate() error {
 			password TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT 'stopped',
 			auto_start BOOLEAN NOT NULL DEFAULT 0,
-			provider_type TEXT NOT NULL DEFAULT 'opencode',
+			provider_type TEXT NOT NULL DEFAULT 'claudecode',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -40,7 +40,7 @@ func (s *Store) migrate() error {
 	}
 
 	// Safe ALTER TABLE for existing databases
-	safeAddColumn(s.db, "instances", "provider_type", "TEXT NOT NULL DEFAULT 'opencode'")
+	safeAddColumn(s.db, "instances", "provider_type", "TEXT NOT NULL DEFAULT 'claudecode'")
 
 	return nil
 }

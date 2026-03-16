@@ -39,7 +39,7 @@ type ProjectConfig struct {
 	Name      string `yaml:"name"`
 	Directory string `yaml:"directory"`
 	AutoStart bool   `yaml:"auto_start"`
-	Provider  string `yaml:"provider"` // "opencode" (default) or "claudecode"
+	Provider  string `yaml:"provider"` // "claudecode" (default) or "opencode"
 }
 
 type StorageConfig struct {

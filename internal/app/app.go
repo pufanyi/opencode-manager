@@ -65,7 +65,7 @@ func (a *App) Start(ctx context.Context) error {
 	for _, proj := range a.cfg.Projects {
 		provType := provider.Type(proj.Provider)
 		if provType == "" {
-			provType = provider.TypeOpenCode
+			provType = provider.TypeClaudeCode
 		}
 
 		existing := a.procMgr.GetInstanceByName(proj.Name)
