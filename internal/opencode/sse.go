@@ -70,7 +70,7 @@ func (s *SSESubscriber) WaitReady(ctx context.Context, timeout time.Duration) er
 		case <-deadline:
 			return fmt.Errorf("instance not ready after %s", timeout)
 		case <-ticker.C:
-			_, err := s.client.Status()
+			err := s.client.Status()
 			if err == nil {
 				return nil
 			}

@@ -84,8 +84,3 @@ type EventPayload struct {
 	Session *Session `json:"session,omitempty"`
 	Message *Message `json:"message,omitempty"`
 }
-
-// StatusResponse from GET /.
-type StatusResponse struct {
-	Version string `json:"version"`
-}

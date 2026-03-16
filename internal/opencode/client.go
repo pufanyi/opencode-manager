@@ -69,13 +69,14 @@ func (c *Client) decodeResponse(resp *http.Response, target any) error {
 }
 
 // Status checks if the OpenCode server is running.
-func (c *Client) Status() (*StatusResponse, error) {
+// GET / returns HTML (the web UI), so we just check for HTTP 200.
+func (c *Client) Status() error {
 	resp, err := c.doRequest("GET", "/", nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var result StatusResponse
-	return &result, c.decodeResponse(resp, &result)
+	resp.Body.Close()
+	return nil
 }
 
 // ListSessions returns all sessions.
