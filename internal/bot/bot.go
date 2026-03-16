@@ -94,12 +94,12 @@ func (b *Bot) SendMessage(ctx context.Context, chatID int64, text string) {
 	_, _ = b.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
 		Text:      text,
-		ParseMode: models.ParseModeMarkdown,
+		ParseMode: models.ParseModeHTML,
 	})
 }
 
 func (b *Bot) NotifyCrash(instName string, err error) {
-	text := fmt.Sprintf("*Instance %s* crashed permanently: %s", escapeMarkdown(instName), err)
+	text := fmt.Sprintf("<b>Instance %s</b> crashed permanently: %s", escapeHTML(instName), err)
 	for _, userID := range b.cfg.AllowedUsers {
 		b.SendMessage(context.Background(), userID, text)
 	}

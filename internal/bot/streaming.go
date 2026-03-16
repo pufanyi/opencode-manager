@@ -126,7 +126,7 @@ func (sc *StreamContext) consumeStream(ctx context.Context, ch <-chan provider.S
 				current := sc.content.String()
 				sc.content.Reset()
 				sc.content.WriteString(current)
-				sc.content.WriteString(fmt.Sprintf("\n%s `%s`", icon, evt.ToolName))
+				sc.content.WriteString(fmt.Sprintf("\n%s <code>%s</code>", icon, escapeHTML(evt.ToolName)))
 				sc.dirty = true
 			case "done":
 				sc.done = true
@@ -181,7 +181,7 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 		return
 	}
 
-	header := fmt.Sprintf("*[%s]*\n\n", escapeMarkdown(sc.instanceName))
+	header := fmt.Sprintf("<b>[%s]</b>\n\n", escapeHTML(sc.instanceName))
 	fullContent := header + content
 
 	if len(fullContent) > fileFallbackLen {
@@ -208,7 +208,7 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 		ChatID:    sc.chatID,
 		MessageID: msgID,
 		Text:      fullContent,
-		ParseMode: models.ParseModeMarkdown,
+		ParseMode: models.ParseModeHTML,
 	}
 
 	if done || final {
@@ -238,7 +238,7 @@ func (sc *StreamContext) handleLongMessage(header, content string, semaphore cha
 		ChatID:    sc.chatID,
 		MessageID: msgID,
 		Text:      header + truncated,
-		ParseMode: models.ParseModeMarkdown,
+		ParseMode: models.ParseModeHTML,
 	})
 
 	<-semaphore
@@ -252,7 +252,7 @@ func (sc *StreamContext) handleLongMessage(header, content string, semaphore cha
 	msg, err := sc.b.SendMessage(context.Background(), &bot.SendMessageParams{
 		ChatID:    sc.chatID,
 		Text:      header + remaining,
-		ParseMode: models.ParseModeMarkdown,
+		ParseMode: models.ParseModeHTML,
 	})
 	<-semaphore
 
@@ -272,21 +272,10 @@ func (sc *StreamContext) sendAsFile(content string) {
 	_, err := sc.b.SendDocument(context.Background(), &bot.SendDocumentParams{
 		ChatID:    sc.chatID,
 		Document:  fileData,
-		Caption:   fmt.Sprintf("*[%s]* Response too long, sent as file.", escapeMarkdown(sc.instanceName)),
-		ParseMode: models.ParseModeMarkdown,
+		Caption:   fmt.Sprintf("<b>[%s]</b> Response too long, sent as file.", escapeHTML(sc.instanceName)),
+		ParseMode: models.ParseModeHTML,
 	})
 	if err != nil {
 		slog.Error("failed to send file", "error", err)
 	}
-}
-
-func escapeMarkdown(s string) string {
-	replacer := strings.NewReplacer(
-		"_", "\\_",
-		"*", "\\*",
-		"[", "\\[",
-		"]", "\\]",
-		"`", "\\`",
-	)
-	return replacer.Replace(s)
 }

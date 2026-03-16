@@ -28,16 +28,16 @@ func NewHandlers(procMgr *process.Manager, st *store.Store, streamMgr *StreamMan
 }
 
 func (h *Handlers) HandleStart(ctx context.Context, b *bot.Bot, update *models.Update) {
-	text := `Welcome to *OpenCode Manager*!
+	text := `Welcome to <b>OpenCode Manager</b>!
 
 Commands:
-/new <name> <path> — Create instance (Claude Code)
-/newopencode <name> <path> — Create OpenCode instance
+/new &lt;name&gt; &lt;path&gt; — Create instance (Claude Code)
+/newopencode &lt;name&gt; &lt;path&gt; — Create OpenCode instance
 /list — List all instances
-/switch <name> — Switch active instance
+/switch &lt;name&gt; — Switch active instance
 /stop [name] — Stop an instance
-/start\_inst <name> — Start a stopped instance
-/status — Current instance & session info
+/start_inst &lt;name&gt; — Start a stopped instance
+/status — Current instance &amp; session info
 /session [new] — Show or create session
 /sessions — List sessions
 /abort — Abort running prompt
@@ -48,7 +48,7 @@ Send any text to prompt the active instance.`
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
 		Text:      text,
-		ParseMode: models.ParseModeMarkdown,
+		ParseMode: models.ParseModeHTML,
 	})
 }
 
@@ -104,8 +104,8 @@ func (h *Handlers) handleNewInstance(ctx context.Context, b *bot.Bot, update *mo
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      update.Message.Chat.ID,
-		Text:        fmt.Sprintf("%s instance *%s* created.\nSwitched to this instance.", label, escapeMarkdown(name)),
-		ParseMode:   models.ParseModeMarkdown,
+		Text:        fmt.Sprintf("%s instance <b>%s</b> created.\nSwitched to this instance.", label, escapeHTML(name)),
+		ParseMode:   models.ParseModeHTML,
 		ReplyMarkup: instanceActionsKeyboard(inst),
 	})
 }
@@ -178,8 +178,8 @@ func (h *Handlers) HandleSwitch(ctx context.Context, b *bot.Bot, update *models.
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
-		Text:      fmt.Sprintf("Switched to *%s*", escapeMarkdown(inst.Name)),
-		ParseMode: models.ParseModeMarkdown,
+		Text:      fmt.Sprintf("Switched to <b>%s</b>", escapeHTML(inst.Name)),
+		ParseMode: models.ParseModeHTML,
 	})
 }
 
@@ -218,8 +218,8 @@ func (h *Handlers) HandleStop(ctx context.Context, b *bot.Bot, update *models.Up
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
-		Text:      fmt.Sprintf("Instance *%s* stopped.", escapeMarkdown(inst.Name)),
-		ParseMode: models.ParseModeMarkdown,
+		Text:      fmt.Sprintf("Instance <b>%s</b> stopped.", escapeHTML(inst.Name)),
+		ParseMode: models.ParseModeHTML,
 	})
 }
 
@@ -261,8 +261,8 @@ func (h *Handlers) HandleStartInst(ctx context.Context, b *bot.Bot, update *mode
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
-		Text:      fmt.Sprintf("Instance *%s* started.", escapeMarkdown(inst.Name)),
-		ParseMode: models.ParseModeMarkdown,
+		Text:      fmt.Sprintf("Instance <b>%s</b> started.", escapeHTML(inst.Name)),
+		ParseMode: models.ParseModeHTML,
 	})
 }
 
@@ -297,13 +297,13 @@ func (h *Handlers) HandleStatus(ctx context.Context, b *bot.Bot, update *models.
 		sessionInfo = state.ActiveSessionID
 	}
 
-	text := fmt.Sprintf("*Active Instance:* %s\n*Provider:* %s\n*Status:* %s\n*Directory:* `%s`\n*Session:* %s",
-		escapeMarkdown(inst.Name), provLabel, string(inst.Status()), inst.Directory, sessionInfo)
+	text := fmt.Sprintf("<b>Active Instance:</b> %s\n<b>Provider:</b> %s\n<b>Status:</b> %s\n<b>Directory:</b> <code>%s</code>\n<b>Session:</b> %s",
+		escapeHTML(inst.Name), provLabel, string(inst.Status()), escapeHTML(inst.Directory), sessionInfo)
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
 		Text:      text,
-		ParseMode: models.ParseModeMarkdown,
+		ParseMode: models.ParseModeHTML,
 	})
 }
 
@@ -331,8 +331,8 @@ func (h *Handlers) HandleSession(ctx context.Context, b *bot.Bot, update *models
 
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    update.Message.Chat.ID,
-			Text:      fmt.Sprintf("*[%s]* New session created: `%s`", escapeMarkdown(inst.Name), session.ID),
-			ParseMode: models.ParseModeMarkdown,
+			Text:      fmt.Sprintf("<b>[%s]</b> New session created: <code>%s</code>", escapeHTML(inst.Name), session.ID),
+			ParseMode: models.ParseModeHTML,
 		})
 		return
 	}
@@ -341,8 +341,8 @@ func (h *Handlers) HandleSession(ctx context.Context, b *bot.Bot, update *models
 	if state.ActiveSessionID == "" {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    update.Message.Chat.ID,
-			Text:      "No active session. Use `/session new` to create one.",
-			ParseMode: models.ParseModeMarkdown,
+			Text:      "No active session. Use <code>/session new</code> to create one.",
+			ParseMode: models.ParseModeHTML,
 		})
 		return
 	}
@@ -363,8 +363,8 @@ func (h *Handlers) HandleSession(ctx context.Context, b *bot.Bot, update *models
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
-		Text:      fmt.Sprintf("*[%s]* Session: `%s`\nTitle: %s", escapeMarkdown(inst.Name), session.ID, title),
-		ParseMode: models.ParseModeMarkdown,
+		Text:      fmt.Sprintf("<b>[%s]</b> Session: <code>%s</code>\nTitle: %s", escapeHTML(inst.Name), session.ID, title),
+		ParseMode: models.ParseModeHTML,
 	})
 }
 
@@ -388,8 +388,8 @@ func (h *Handlers) HandleSessions(ctx context.Context, b *bot.Bot, update *model
 	if len(sessions) == 0 {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    update.Message.Chat.ID,
-			Text:      fmt.Sprintf("*[%s]* No sessions. Use `/session new` to create one.", escapeMarkdown(inst.Name)),
-			ParseMode: models.ParseModeMarkdown,
+			Text:      fmt.Sprintf("<b>[%s]</b> No sessions. Use <code>/session new</code> to create one.", escapeHTML(inst.Name)),
+			ParseMode: models.ParseModeHTML,
 		})
 		return
 	}
@@ -401,8 +401,8 @@ func (h *Handlers) HandleSessions(ctx context.Context, b *bot.Bot, update *model
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      update.Message.Chat.ID,
-		Text:        fmt.Sprintf("*[%s]* Sessions:", escapeMarkdown(inst.Name)),
-		ParseMode:   models.ParseModeMarkdown,
+		Text:        fmt.Sprintf("<b>[%s]</b> Sessions:", escapeHTML(inst.Name)),
+		ParseMode:   models.ParseModeHTML,
 		ReplyMarkup: sessionListKeyboard(entries),
 	})
 }
@@ -433,8 +433,8 @@ func (h *Handlers) HandleAbort(ctx context.Context, b *bot.Bot, update *models.U
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
-		Text:      fmt.Sprintf("*[%s]* Aborted.", escapeMarkdown(inst.Name)),
-		ParseMode: models.ParseModeMarkdown,
+		Text:      fmt.Sprintf("<b>[%s]</b> Aborted.", escapeHTML(inst.Name)),
+		ParseMode: models.ParseModeHTML,
 	})
 }
 
@@ -466,9 +466,8 @@ func (h *Handlers) HandlePrompt(ctx context.Context, b *bot.Bot, update *models.
 
 	// Send placeholder
 	placeholder, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:    update.Message.Chat.ID,
-		Text:      fmt.Sprintf("*[%s]* _Thinking..._", escapeMarkdown(inst.Name)),
-		ParseMode: models.ParseModeMarkdown,
+		ChatID: update.Message.Chat.ID,
+		Text:   fmt.Sprintf("[%s] Thinking...", inst.Name),
 	})
 	if err != nil {
 		slog.Error("failed to send placeholder", "error", err)
@@ -483,8 +482,8 @@ func (h *Handlers) HandlePrompt(ctx context.Context, b *bot.Bot, update *models.
 		_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    update.Message.Chat.ID,
 			MessageID: placeholder.ID,
-			Text:      fmt.Sprintf("*[%s]* Failed to send prompt: %s", escapeMarkdown(inst.Name), err),
-			ParseMode: models.ParseModeMarkdown,
+			Text:      fmt.Sprintf("<b>[%s]</b> Failed to send prompt: %s", escapeHTML(inst.Name), err),
+			ParseMode: models.ParseModeHTML,
 		})
 		return
 	}

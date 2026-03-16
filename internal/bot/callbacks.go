@@ -62,8 +62,8 @@ func (h *Handlers) callbackSwitch(ctx context.Context, b *bot.Bot, chatID int64,
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
-		Text:      fmt.Sprintf("Switched to *%s*", escapeMarkdown(inst.Name)),
-		ParseMode: models.ParseModeMarkdown,
+		Text:      fmt.Sprintf("Switched to <b>%s</b>", escapeHTML(inst.Name)),
+		ParseMode: models.ParseModeHTML,
 	})
 }
 
@@ -83,8 +83,8 @@ func (h *Handlers) callbackStop(ctx context.Context, b *bot.Bot, chatID int64, u
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
-		Text:      fmt.Sprintf("Instance *%s* stopped.", escapeMarkdown(inst.Name)),
-		ParseMode: models.ParseModeMarkdown,
+		Text:      fmt.Sprintf("Instance <b>%s</b> stopped.", escapeHTML(inst.Name)),
+		ParseMode: models.ParseModeHTML,
 	})
 }
 
@@ -107,8 +107,8 @@ func (h *Handlers) callbackStart(ctx context.Context, b *bot.Bot, chatID int64, 
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
-		Text:      fmt.Sprintf("Instance *%s* started.", escapeMarkdown(inst.Name)),
-		ParseMode: models.ParseModeMarkdown,
+		Text:      fmt.Sprintf("Instance <b>%s</b> started.", escapeHTML(inst.Name)),
+		ParseMode: models.ParseModeHTML,
 	})
 }
 
@@ -130,8 +130,8 @@ func (h *Handlers) callbackDelete(ctx context.Context, b *bot.Bot, chatID int64,
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
-		Text:      fmt.Sprintf("Instance *%s* deleted.", escapeMarkdown(name)),
-		ParseMode: models.ParseModeMarkdown,
+		Text:      fmt.Sprintf("Instance <b>%s</b> deleted.", escapeHTML(name)),
+		ParseMode: models.ParseModeHTML,
 	})
 }
 
@@ -148,8 +148,8 @@ func (h *Handlers) callbackSession(ctx context.Context, b *bot.Bot, chatID int64
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
-		Text:      fmt.Sprintf("*[%s]* Switched to session `%s`", escapeMarkdown(instName), sessionID),
-		ParseMode: models.ParseModeMarkdown,
+		Text:      fmt.Sprintf("<b>[%s]</b> Switched to session <code>%s</code>", escapeHTML(instName), sessionID),
+		ParseMode: models.ParseModeHTML,
 	})
 }
 
@@ -169,8 +169,8 @@ func (h *Handlers) callbackAbort(ctx context.Context, b *bot.Bot, chatID int64, 
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
-		Text:      fmt.Sprintf("*[%s]* Aborted.", escapeMarkdown(inst.Name)),
-		ParseMode: models.ParseModeMarkdown,
+		Text:      fmt.Sprintf("<b>[%s]</b> Aborted.", escapeHTML(inst.Name)),
+		ParseMode: models.ParseModeHTML,
 	})
 }
 
@@ -191,7 +191,7 @@ func (h *Handlers) callbackNewSession(ctx context.Context, b *bot.Bot, chatID in
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
-		Text:      fmt.Sprintf("*[%s]* New session: `%s`", escapeMarkdown(inst.Name), session.ID),
-		ParseMode: models.ParseModeMarkdown,
+		Text:      fmt.Sprintf("<b>[%s]</b> New session: <code>%s</code>", escapeHTML(inst.Name), session.ID),
+		ParseMode: models.ParseModeHTML,
 	})
 }
