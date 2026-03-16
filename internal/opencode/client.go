@@ -44,7 +44,7 @@ func (c *Client) doRequest(method, path string, body any) (*http.Response, error
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	req.SetBasicAuth("", c.password)
+	req.SetBasicAuth("opencode", c.password)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

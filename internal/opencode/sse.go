@@ -98,7 +98,7 @@ func (s *SSESubscriber) connect(ctx context.Context) (connected bool, err error)
 		return false, fmt.Errorf("creating SSE request: %w", err)
 	}
 
-	req.SetBasicAuth("", s.client.password)
+	req.SetBasicAuth("opencode", s.client.password)
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cache-Control", "no-cache")
 

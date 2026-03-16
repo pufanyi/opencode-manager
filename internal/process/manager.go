@@ -257,7 +257,7 @@ func (m *Manager) HealthCheck(inst *Instance) bool {
 	if err != nil {
 		return false
 	}
-	req.SetBasicAuth("", inst.Password)
+	req.SetBasicAuth("opencode", inst.Password)
 
 	resp, err := client.Do(req)
 	if err != nil {

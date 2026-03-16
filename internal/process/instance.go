@@ -59,12 +59,12 @@ func (i *Instance) Start(ctx context.Context, binary string) error {
 	cmdCtx, cancel := context.WithCancel(ctx)
 	i.cancel = cancel
 
-	configJSON := fmt.Sprintf(`{"server":{"port":%d,"hostname":"127.0.0.1"}}`, i.Port)
-
-	cmd := exec.CommandContext(cmdCtx, binary, "serve")
+	cmd := exec.CommandContext(cmdCtx, binary, "serve",
+		"--port", fmt.Sprintf("%d", i.Port),
+		"--hostname", "127.0.0.1",
+	)
 	cmd.Dir = i.Directory
 	cmd.Env = append(cmd.Environ(),
-		fmt.Sprintf("OPENCODE_CONFIG_CONTENT=%s", configJSON),
 		fmt.Sprintf("OPENCODE_SERVER_PASSWORD=%s", i.Password),
 	)
 
