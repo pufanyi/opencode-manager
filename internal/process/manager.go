@@ -54,7 +54,11 @@ func (m *Manager) CreateAndStart(name, directory string, autoStart bool) (*Insta
 		return nil, err
 	}
 
-	password := generatePassword()
+	password, err := generatePassword()
+	if err != nil {
+		m.portPool.Release(port)
+		return nil, err
+	}
 	id := uuid.New().String()
 
 	inst := &Instance{
@@ -371,8 +375,10 @@ func (m *Manager) Shutdown() {
 	}
 }
 
-func generatePassword() string {
+func generatePassword() (string, error) {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating password: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
