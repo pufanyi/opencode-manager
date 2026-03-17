@@ -2,9 +2,16 @@ package bot
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -540,6 +547,147 @@ func (h *Handlers) HandlePrompt(ctx context.Context, b *bot.Bot, update *models.
 	sc := h.streamMgr.StartStream(b, update.Message.Chat.ID, placeholder.ID, state.ActiveSessionID, inst.Name, ch)
 	_ = sc
 	_ = promptCancel // cancel is held by the stream context
+}
+
+func (h *Handlers) HandlePhoto(ctx context.Context, b *bot.Bot, update *models.Update) {
+	userID := update.Message.From.ID
+	caption := update.Message.Caption
+
+	inst, err := h.getActiveInstance(userID)
+	if err != nil {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: err.Error()})
+		return
+	}
+
+	state, _ := h.store.GetUserState(userID)
+
+	// Auto-create session if none exists
+	if state.ActiveSessionID == "" {
+		session, err := inst.Provider.CreateSession(ctx)
+		if err != nil {
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: update.Message.Chat.ID,
+				Text:   fmt.Sprintf("Failed to create session: %s", err),
+			})
+			return
+		}
+		_ = h.store.SetActiveSession(userID, session.ID)
+		state.ActiveSessionID = session.ID
+
+		title := caption
+		if title == "" {
+			title = "(image)"
+		}
+		if len(title) > 60 {
+			title = title[:60] + "..."
+		}
+		_ = h.store.UpdateClaudeSessionTitle(session.ID, title)
+	}
+
+	// Pick the largest photo (last in the array)
+	photos := update.Message.Photo
+	photo := photos[len(photos)-1]
+
+	// Download photo to temp file
+	localPath, err := h.downloadTelegramFile(ctx, b, photo.FileID, inst.ID)
+	if err != nil {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   fmt.Sprintf("Failed to download image: %s", err),
+		})
+		return
+	}
+
+	// Build prompt text
+	var prompt string
+	if caption != "" {
+		prompt = fmt.Sprintf("%s\n\nImage file: %s", caption, localPath)
+	} else {
+		prompt = fmt.Sprintf("Please analyze this image.\n\nImage file: %s", localPath)
+	}
+
+	_ = h.store.UpdateClaudeSessionActivity(state.ActiveSessionID)
+
+	placeholder, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: update.Message.Chat.ID,
+		Text:   fmt.Sprintf("[%s] Thinking...", inst.Name),
+	})
+	if err != nil {
+		slog.Error("failed to send placeholder", "error", err)
+		return
+	}
+
+	promptCtx, promptCancel := context.WithCancel(context.Background())
+	ch, err := inst.Provider.Prompt(promptCtx, state.ActiveSessionID, prompt)
+	if err != nil {
+		promptCancel()
+		_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    update.Message.Chat.ID,
+			MessageID: placeholder.ID,
+			Text:      fmt.Sprintf("<b>[%s]</b> Failed to send prompt: %s", escapeHTML(inst.Name), err),
+			ParseMode: models.ParseModeHTML,
+		})
+		// Clean up image on failure
+		os.Remove(localPath)
+		return
+	}
+
+	sc := h.streamMgr.StartStream(b, update.Message.Chat.ID, placeholder.ID, state.ActiveSessionID, inst.Name, ch)
+	sc.AddCleanupFile(localPath)
+	_ = promptCancel
+}
+
+// downloadTelegramFile downloads a Telegram file to /tmp/opencode-manager/{instanceID}/images/.
+func (h *Handlers) downloadTelegramFile(ctx context.Context, b *bot.Bot, fileID, instanceID string) (string, error) {
+	file, err := b.GetFile(ctx, &bot.GetFileParams{FileID: fileID})
+	if err != nil {
+		return "", fmt.Errorf("getFile: %w", err)
+	}
+
+	downloadURL := b.FileDownloadLink(file)
+
+	// Determine extension from Telegram's file path
+	ext := filepath.Ext(file.FilePath)
+	if ext == "" {
+		ext = ".jpg"
+	}
+
+	// Create temp directory
+	dir := filepath.Join(os.TempDir(), "opencode-manager", instanceID, "images")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir: %w", err)
+	}
+
+	// Generate filename: timestamp-random
+	var randBytes [4]byte
+	_, _ = rand.Read(randBytes[:])
+	filename := fmt.Sprintf("%s-%s%s", time.Now().Format("20060102-150405"), hex.EncodeToString(randBytes[:]), ext)
+	localPath := filepath.Join(dir, filename)
+
+	// Download
+	resp, err := http.Get(downloadURL)
+	if err != nil {
+		return "", fmt.Errorf("download: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download returned %d", resp.StatusCode)
+	}
+
+	out, err := os.Create(localPath)
+	if err != nil {
+		return "", fmt.Errorf("create file: %w", err)
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		os.Remove(localPath)
+		return "", fmt.Errorf("write file: %w", err)
+	}
+
+	slog.Info("downloaded telegram photo", "path", localPath, "size", file.FileSize)
+	return localPath, nil
 }
 
 // getActiveInstance returns the active instance for a user.

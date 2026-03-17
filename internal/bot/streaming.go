@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -43,11 +44,12 @@ type StreamContext struct {
 	textContent string
 	tools       []toolStatus
 
-	dirty    bool
-	done     bool
-	messages []int // IDs of continuation messages
-	cancel   context.CancelFunc
-	lastEdit time.Time
+	dirty        bool
+	done         bool
+	messages     []int // IDs of continuation messages
+	cancel       context.CancelFunc
+	lastEdit     time.Time
+	cleanupFiles []string // temp files to remove when stream ends
 }
 
 // StreamManager handles all active streams and global rate limiting.
@@ -96,6 +98,13 @@ func (sm *StreamManager) StartStream(b *bot.Bot, chatID int64, messageID int, se
 	go sc.flushLoop(ctx, sm.semaphore)
 
 	return sc
+}
+
+// AddCleanupFile registers a temp file to be deleted when the stream ends.
+func (sc *StreamContext) AddCleanupFile(path string) {
+	sc.mu.Lock()
+	sc.cleanupFiles = append(sc.cleanupFiles, path)
+	sc.mu.Unlock()
 }
 
 func (sm *StreamManager) RemoveStream(sessionID string) {
@@ -162,6 +171,7 @@ func (sc *StreamContext) flushLoop(ctx context.Context, semaphore chan struct{})
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	defer sc.cleanup()
 
 	for {
 		select {
@@ -174,6 +184,22 @@ func (sc *StreamContext) flushLoop(ctx context.Context, semaphore chan struct{})
 				return
 			}
 			sc.flush(semaphore, false)
+		}
+	}
+}
+
+// cleanup removes any temp files registered via AddCleanupFile.
+func (sc *StreamContext) cleanup() {
+	sc.mu.Lock()
+	files := sc.cleanupFiles
+	sc.cleanupFiles = nil
+	sc.mu.Unlock()
+
+	for _, f := range files {
+		if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+			slog.Warn("failed to clean up temp file", "path", f, "error", err)
+		} else {
+			slog.Debug("cleaned up temp file", "path", f)
 		}
 	}
 }

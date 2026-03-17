@@ -37,12 +37,17 @@ func New(cfg *config.TelegramConfig, procMgr *process.Manager, st *store.Store) 
 				return
 			}
 
-			if update.Message != nil && update.Message.Text != "" {
+			if update.Message != nil {
 				if !allowedUsers[update.Message.From.ID] {
 					return
 				}
-				slog.Info("default handler: treating as prompt", "text", update.Message.Text)
-				handlers.HandlePrompt(ctx, b, update)
+				if update.Message.Photo != nil && len(update.Message.Photo) > 0 {
+					slog.Info("default handler: treating as photo prompt")
+					handlers.HandlePhoto(ctx, b, update)
+				} else if update.Message.Text != "" {
+					slog.Info("default handler: treating as prompt", "text", update.Message.Text)
+					handlers.HandlePrompt(ctx, b, update)
+				}
 			}
 		}),
 	}
