@@ -318,4 +318,3 @@ func truncateHTML(html string, maxBytes int) string {
 	truncated := html[:cut]
 	return balanceHTML(truncated)
 }
-

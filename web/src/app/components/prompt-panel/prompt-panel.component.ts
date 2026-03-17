@@ -39,7 +39,7 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
   private eventSource: EventSource | null = null;
 
   ngOnChanges(changes: SimpleChanges): void {
-    if (changes["instance"]) {
+    if (changes.instance) {
       this.closeSSE();
       this.sessions = [];
       this.selectedSessionId = "";
