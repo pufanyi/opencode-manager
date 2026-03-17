@@ -190,10 +190,12 @@ func (sc *StreamContext) flushLoop(ctx context.Context, semaphore chan struct{})
 			sc.flush(semaphore, true)
 			return
 		case <-ticker.C:
-			sc.flush(semaphore, false)
 			if sc.isDone() {
+				// Final flush with final=true to finalize draft / add keyboard
+				sc.flush(semaphore, true)
 				return
 			}
+			sc.flush(semaphore, false)
 		}
 	}
 }

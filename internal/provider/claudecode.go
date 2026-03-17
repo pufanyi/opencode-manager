@@ -28,14 +28,16 @@ type ClaudeCodeProvider struct {
 	activeCmd     *exec.Cmd
 	activeCancel  context.CancelFunc
 	activeSession string
+	usedSessions  map[string]bool // sessions that have been prompted at least once
 }
 
 func NewClaudeCodeProvider(binary, dir string, st *store.Store, instanceID string) *ClaudeCodeProvider {
 	return &ClaudeCodeProvider{
-		binary: binary,
-		dir:    dir,
-		store:  st,
-		instID: instanceID,
+		binary:       binary,
+		dir:          dir,
+		store:        st,
+		instID:       instanceID,
+		usedSessions: make(map[string]bool),
 	}
 }
 
@@ -46,6 +48,19 @@ func (p *ClaudeCodeProvider) Start(ctx context.Context) error {
 	if _, err := exec.LookPath(p.binary); err != nil {
 		return fmt.Errorf("claude binary not found: %w", err)
 	}
+
+	// Pre-load existing sessions so we use --resume for them
+	existing, err := p.store.ListClaudeSessions(p.instID)
+	if err == nil {
+		p.mu.Lock()
+		for _, s := range existing {
+			if s.MessageCount > 0 {
+				p.usedSessions[s.ID] = true
+			}
+		}
+		p.mu.Unlock()
+	}
+
 	slog.Info("claude code provider ready", "dir", p.dir)
 	return nil
 }
@@ -133,16 +148,25 @@ func (p *ClaudeCodeProvider) Prompt(ctx context.Context, sessionID string, conte
 	cmdCtx, cancel := context.WithCancel(ctx)
 	p.activeCancel = cancel
 	p.activeSession = sessionID
+	isResume := p.usedSessions[sessionID]
 	p.mu.Unlock()
 
-	cmd := exec.CommandContext(cmdCtx, p.binary,
+	// First prompt for a session uses --session-id (creates new session).
+	// Subsequent prompts use --resume (continues existing session).
+	args := []string{
 		"-p", content,
 		"--output-format", "stream-json",
 		"--verbose",
 		"--include-partial-messages",
-		"--session-id", sessionID,
 		"--permission-mode", "bypassPermissions",
-	)
+	}
+	if isResume {
+		args = append(args, "--resume", sessionID)
+	} else {
+		args = append(args, "--session-id", sessionID)
+	}
+
+	cmd := exec.CommandContext(cmdCtx, p.binary, args...)
 	cmd.Dir = p.dir
 
 	var stderrBuf bytes.Buffer
@@ -162,6 +186,12 @@ func (p *ClaudeCodeProvider) Prompt(ctx context.Context, sessionID string, conte
 		cancel()
 		return nil, fmt.Errorf("starting claude: %w", err)
 	}
+
+	// Mark session as used only after process starts successfully,
+	// so a failed start doesn't cause the next attempt to use --resume.
+	p.mu.Lock()
+	p.usedSessions[sessionID] = true
+	p.mu.Unlock()
 
 	slog.Info("claude prompt started", "session", sessionID, "pid", cmd.Process.Pid)
 
