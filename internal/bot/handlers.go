@@ -544,7 +544,7 @@ func (h *Handlers) HandlePrompt(ctx context.Context, b *bot.Bot, update *models.
 	}
 
 	// Wire up streaming
-	sc := h.streamMgr.StartStream(b, update.Message.Chat.ID, placeholder.ID, state.ActiveSessionID, inst.Name, ch)
+	sc := h.streamMgr.StartStream(b, update.Message.Chat.ID, placeholder.ID, state.ActiveSessionID, inst.Name, inst.Directory, ch)
 	_ = sc
 	_ = promptCancel // cancel is held by the stream context
 }
@@ -632,7 +632,7 @@ func (h *Handlers) HandlePhoto(ctx context.Context, b *bot.Bot, update *models.U
 		return
 	}
 
-	sc := h.streamMgr.StartStream(b, update.Message.Chat.ID, placeholder.ID, state.ActiveSessionID, inst.Name, ch)
+	sc := h.streamMgr.StartStream(b, update.Message.Chat.ID, placeholder.ID, state.ActiveSessionID, inst.Name, inst.Directory, ch)
 	sc.AddCleanupFile(localPath)
 	_ = promptCancel
 }
