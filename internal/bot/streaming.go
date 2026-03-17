@@ -64,10 +64,12 @@ type StreamContext struct {
 
 	dirty        bool
 	done         bool
+	superseded   bool // true if replaced by a newer stream for the same session
 	cancel       context.CancelFunc
 	promptCancel context.CancelFunc
 	abortFunc    func()
-	cleanupFiles []string // temp files to remove when stream ends
+	cleanupFiles    []string // temp files to remove when stream ends
+	onDoneCallbacks []func()
 }
 
 // StreamManager handles all active streams and global rate limiting.
@@ -111,6 +113,7 @@ func (sm *StreamManager) StartStream(b *bot.Bot, st *store.Store, chatID int64, 
 	taskID := sm.nextID
 
 	if old, ok := sm.streams[sessionID]; ok {
+		old.MarkSuperseded()
 		old.cancel()
 		delete(sm.taskMap, old.taskID)
 	}
@@ -167,6 +170,22 @@ func (sm *StreamManager) StartStream(b *bot.Bot, st *store.Store, chatID int64, 
 func (sc *StreamContext) AddCleanupFile(path string) {
 	sc.mu.Lock()
 	sc.cleanupFiles = append(sc.cleanupFiles, path)
+	sc.mu.Unlock()
+}
+
+// OnDone registers a callback to run when the stream finishes normally
+// (not when superseded by a newer stream for the same session).
+func (sc *StreamContext) OnDone(fn func()) {
+	sc.mu.Lock()
+	sc.onDoneCallbacks = append(sc.onDoneCallbacks, fn)
+	sc.mu.Unlock()
+}
+
+// MarkSuperseded marks this stream as replaced by a newer one. Its OnDone
+// callbacks will be skipped during cleanup.
+func (sc *StreamContext) MarkSuperseded() {
+	sc.mu.Lock()
+	sc.superseded = true
 	sc.mu.Unlock()
 }
 
@@ -390,11 +409,14 @@ func (sc *StreamContext) sendMergeFailureNotification() {
 	sc.manager.NotifyNewMessage(sc.chatID)
 }
 
-// cleanup removes any temp files registered via AddCleanupFile.
+// cleanup removes temp files and runs OnDone callbacks (unless superseded).
 func (sc *StreamContext) cleanup() {
 	sc.mu.Lock()
 	files := sc.cleanupFiles
 	sc.cleanupFiles = nil
+	callbacks := sc.onDoneCallbacks
+	sc.onDoneCallbacks = nil
+	superseded := sc.superseded
 	sc.mu.Unlock()
 
 	for _, f := range files {
@@ -402,6 +424,14 @@ func (sc *StreamContext) cleanup() {
 			slog.Warn("failed to clean up temp file", "path", f, "error", err)
 		} else {
 			slog.Debug("cleaned up temp file", "path", f)
+		}
+	}
+
+	// Run OnDone callbacks only if this stream was not superseded by a
+	// newer stream for the same session.
+	if !superseded {
+		for _, fn := range callbacks {
+			fn()
 		}
 	}
 }

@@ -79,3 +79,26 @@ type Provider interface {
 	// Abort cancels a running prompt for the given session.
 	Abort(ctx context.Context, sessionID string) error
 }
+
+// MainDirLocker is an optional interface for providers that support
+// exclusive locking of the main working directory. When implemented,
+// only one session at a time may run prompts in the main directory.
+type MainDirLocker interface {
+	// IsMainDirBusy returns true if the main directory is in use by a
+	// session other than the given sessionID. Pass "" to check if anyone
+	// holds the lock.
+	IsMainDirBusy(sessionID string) bool
+
+	// TryAcquireMainDir attempts to acquire exclusive main-dir access for
+	// the given session. Returns true on success. Re-entrant for the same
+	// sessionID.
+	TryAcquireMainDir(sessionID string) bool
+
+	// WaitMainDirFree returns a channel that is closed when the main
+	// directory becomes free. If already free, the returned channel is
+	// already closed.
+	WaitMainDirFree() <-chan struct{}
+
+	// ReleaseMainDir releases the main-dir lock held by the given session.
+	ReleaseMainDir(sessionID string)
+}
