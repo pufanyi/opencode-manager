@@ -442,12 +442,13 @@ type claudeEvent struct {
 	Type    string `json:"type"`
 	Subtype string `json:"subtype,omitempty"`
 
-	Event   *claudeStreamEvent `json:"event,omitempty"`
-	Message *claudeMessage     `json:"message,omitempty"`
-	Result  string             `json:"result,omitempty"`
-	IsError bool               `json:"is_error,omitempty"`
-	Error   string             `json:"error,omitempty"`
-	Tool    *claudeTool        `json:"tool,omitempty"`
+	Event     *claudeStreamEvent     `json:"event,omitempty"`
+	Message   *claudeMessage         `json:"message,omitempty"`
+	Result    string                 `json:"result,omitempty"`
+	IsError   bool                   `json:"is_error,omitempty"`
+	Error     string                 `json:"error,omitempty"`
+	Tool      *claudeTool            `json:"tool,omitempty"`
+	ToolInput map[string]interface{} `json:"tool_input,omitempty"`
 }
 
 type claudeStreamEvent struct {
@@ -472,7 +473,8 @@ type claudeBlock struct {
 }
 
 type claudeTool struct {
-	Name string `json:"name,omitempty"`
+	Name  string                 `json:"name,omitempty"`
+	Input map[string]interface{} `json:"input,omitempty"`
 }
 
 type textAccumulator struct {
@@ -486,6 +488,27 @@ func (a *textAccumulator) append(delta string) string {
 
 func (a *textAccumulator) reset() {
 	a.buf.Reset()
+}
+
+// extractToolDetail extracts a human-readable detail string from tool input.
+// For Agent tools, this is the "description" field.
+func extractToolDetail(name string, tool *claudeTool, topInput map[string]interface{}) string {
+	if name != "Agent" {
+		return ""
+	}
+	// Try tool.Input (nested inside tool object)
+	if tool != nil && tool.Input != nil {
+		if desc, ok := tool.Input["description"].(string); ok && desc != "" {
+			return desc
+		}
+	}
+	// Try top-level tool_input
+	if topInput != nil {
+		if desc, ok := topInput["description"].(string); ok && desc != "" {
+			return desc
+		}
+	}
+	return ""
 }
 
 func parseClaudeEvent(line []byte, acc *textAccumulator) *StreamEvent {
@@ -532,7 +555,8 @@ func parseClaudeEvent(line []byte, acc *textAccumulator) *StreamEvent {
 			name = evt.Tool.Name
 		}
 		if name != "" {
-			return &StreamEvent{Type: "tool_use", ToolName: name, ToolState: "running"}
+			detail := extractToolDetail(name, evt.Tool, evt.ToolInput)
+			return &StreamEvent{Type: "tool_use", ToolName: name, ToolState: "running", ToolDetail: detail}
 		}
 
 	case "tool_result":

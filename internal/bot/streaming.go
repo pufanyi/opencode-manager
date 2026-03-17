@@ -23,8 +23,9 @@ const (
 
 // toolStatus tracks a single tool invocation's display state.
 type toolStatus struct {
-	Name  string
-	State string // "running", "completed", "error"
+	Name   string
+	State  string // "running", "completed", "error"
+	Detail string // Short description (e.g., Agent task description)
 }
 
 // boardEntry holds snapshot data for one stream in the status board.
@@ -33,6 +34,7 @@ type boardEntry struct {
 	instanceName string
 	sessionTitle string
 	currentTool  string
+	toolDetail   string // Agent description for richer display
 	elapsed      time.Duration
 }
 
@@ -216,7 +218,7 @@ func (sc *StreamContext) consumeStream(ctx context.Context, ch <-chan provider.S
 				sc.textContent = evt.Text
 				sc.dirty = true
 			case "tool_use":
-				sc.updateTool(evt.ToolName, evt.ToolState)
+				sc.updateTool(evt.ToolName, evt.ToolState, evt.ToolDetail)
 				sc.dirty = true
 			case "done":
 				sc.done = true
@@ -231,15 +233,18 @@ func (sc *StreamContext) consumeStream(ctx context.Context, ch <-chan provider.S
 	}
 }
 
-// updateTool adds or updates a tool's status.
-func (sc *StreamContext) updateTool(name, state string) {
+// updateTool adds or updates a tool's status and detail.
+func (sc *StreamContext) updateTool(name, state, detail string) {
 	for i := range sc.tools {
 		if sc.tools[i].Name == name && sc.tools[i].State == "running" {
 			sc.tools[i].State = state
+			if detail != "" {
+				sc.tools[i].Detail = detail
+			}
 			return
 		}
 	}
-	sc.tools = append(sc.tools, toolStatus{Name: name, State: state})
+	sc.tools = append(sc.tools, toolStatus{Name: name, State: state, Detail: detail})
 }
 
 func (sc *StreamContext) flushLoop(ctx context.Context, semaphore chan struct{}) {
@@ -325,13 +330,10 @@ func (sc *StreamContext) isDone() bool {
 func (sc *StreamContext) sendResponse(semaphore chan struct{}) {
 	sc.mu.Lock()
 	text := sc.textContent
-	tools := make([]toolStatus, len(sc.tools))
-	copy(tools, sc.tools)
 	sc.mu.Unlock()
 
-	// --- Build HTML content ---
+	// --- Build HTML content (final response — no tools, board handles that) ---
 	header := fmt.Sprintf("<b>[%s]</b>", escapeHTML(sc.instanceName))
-	toolsHTML := formatToolsHTML(tools)
 
 	var renderedText string
 	if text != "" {
@@ -342,26 +344,14 @@ func (sc *StreamContext) sendResponse(semaphore chan struct{}) {
 	}
 
 	fullContent := header
-	if toolsHTML != "" {
-		fullContent += "\n" + toolsHTML
-	}
 	if renderedText != "" {
 		fullContent += "\n\n" + renderedText
-	}
-	if toolsHTML == "" && renderedText == "" {
+	} else {
 		fullContent += " Done."
 	}
 
 	// --- Build plain-text fallback ---
-	toolsPlain := formatToolsPlain(tools)
-	var rawParts []string
-	if toolsPlain != "" {
-		rawParts = append(rawParts, toolsPlain)
-	}
-	if text != "" {
-		rawParts = append(rawParts, text)
-	}
-	rawContent := strings.Join(rawParts, "\n\n")
+	rawContent := text
 	if rawContent == "" {
 		rawContent = "Done."
 	}
@@ -543,10 +533,11 @@ func (sm *StreamManager) refreshBoard() {
 	for _, sc := range sm.streams {
 		sc.mu.Lock()
 		if !sc.done {
-			var tool string
+			var tool, detail string
 			for j := len(sc.tools) - 1; j >= 0; j-- {
 				if sc.tools[j].State == "running" {
 					tool = sc.tools[j].Name
+					detail = sc.tools[j].Detail
 					break
 				}
 			}
@@ -555,6 +546,7 @@ func (sm *StreamManager) refreshBoard() {
 				instanceName: sc.instanceName,
 				sessionTitle: sc.sessionTitle,
 				currentTool:  tool,
+				toolDetail:   detail,
 				elapsed:      time.Since(sc.startedAt),
 			})
 		}
@@ -653,11 +645,15 @@ func buildBoardHTML(entries []boardEntry) string {
 
 		status := "thinking"
 		if e.currentTool != "" {
-			status = strings.ToValidUTF8(e.currentTool, "\uFFFD")
+			if e.currentTool == "Agent" && e.toolDetail != "" {
+				status = strings.ToValidUTF8(e.toolDetail, "\uFFFD")
+			} else {
+				status = strings.ToValidUTF8(e.currentTool, "\uFFFD")
+			}
 		}
 
 		sb.WriteString(fmt.Sprintf("\n<b>#%d</b> %s\n", e.taskID, escapeHTML(inst)))
-		sb.WriteString(fmt.Sprintf("  %s | ⏳ %s (%s)\n", escapeHTML(title), escapeHTML(status), formatElapsed(e.elapsed)))
+		sb.WriteString(fmt.Sprintf("  %s | 🔄 %s (%s)\n", escapeHTML(title), escapeHTML(status), formatElapsed(e.elapsed)))
 	}
 
 	return sb.String()
