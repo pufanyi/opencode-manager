@@ -131,21 +131,24 @@ func (s *Store) CreateClaudeSession(instanceID, sessionID, title string) error {
 
 func (s *Store) GetClaudeSession(sessionID string) (*ClaudeSession, error) {
 	cs := &ClaudeSession{}
+	var createdAt, updatedAt string
 	err := s.db.QueryRow(
-		`SELECT id, instance_id, title, created_at, COALESCE(updated_at, created_at), COALESCE(message_count, 0) FROM claude_sessions WHERE id = ?`, sessionID,
-	).Scan(&cs.ID, &cs.InstanceID, &cs.Title, &cs.CreatedAt, &cs.UpdatedAt, &cs.MessageCount)
+		`SELECT id, instance_id, COALESCE(title, ''), COALESCE(created_at, ''), COALESCE(updated_at, created_at, ''), COALESCE(message_count, 0) FROM claude_sessions WHERE id = ?`, sessionID,
+	).Scan(&cs.ID, &cs.InstanceID, &cs.Title, &createdAt, &updatedAt, &cs.MessageCount)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	cs.CreatedAt = parseTime(createdAt)
+	cs.UpdatedAt = parseTime(updatedAt)
 	return cs, nil
 }
 
 func (s *Store) ListClaudeSessions(instanceID string) ([]ClaudeSession, error) {
 	rows, err := s.db.Query(
-		`SELECT id, instance_id, title, created_at, COALESCE(updated_at, created_at), COALESCE(message_count, 0)
+		`SELECT id, instance_id, COALESCE(title, ''), COALESCE(created_at, ''), COALESCE(updated_at, created_at, ''), COALESCE(message_count, 0)
 		 FROM claude_sessions WHERE instance_id = ? ORDER BY COALESCE(updated_at, created_at) DESC`, instanceID,
 	)
 	if err != nil {
@@ -156,12 +159,28 @@ func (s *Store) ListClaudeSessions(instanceID string) ([]ClaudeSession, error) {
 	var sessions []ClaudeSession
 	for rows.Next() {
 		var cs ClaudeSession
-		if err := rows.Scan(&cs.ID, &cs.InstanceID, &cs.Title, &cs.CreatedAt, &cs.UpdatedAt, &cs.MessageCount); err != nil {
+		var createdAt, updatedAt string
+		if err := rows.Scan(&cs.ID, &cs.InstanceID, &cs.Title, &createdAt, &updatedAt, &cs.MessageCount); err != nil {
 			return nil, err
 		}
+		cs.CreatedAt = parseTime(createdAt)
+		cs.UpdatedAt = parseTime(updatedAt)
 		sessions = append(sessions, cs)
 	}
 	return sessions, rows.Err()
+}
+
+func parseTime(s string) time.Time {
+	for _, layout := range []string{
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05Z",
+		time.RFC3339,
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 func (s *Store) UpdateClaudeSessionTitle(sessionID, title string) error {
