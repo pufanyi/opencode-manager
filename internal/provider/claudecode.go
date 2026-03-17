@@ -152,7 +152,7 @@ func (p *ClaudeCodeProvider) removeWorktree(wtPath string) error {
 	}
 
 	// Prune stale worktrees
-	exec.Command("git", "-C", p.dir, "worktree", "prune").Run()
+	_ = exec.Command("git", "-C", p.dir, "worktree", "prune").Run()
 	return nil
 }
 
@@ -177,7 +177,7 @@ func (p *ClaudeCodeProvider) mergeAndSync(sessionID, wtPath, branch string) erro
 	mergeCmd.Stderr = &mergeStderr
 	if err := mergeCmd.Run(); err != nil {
 		// Abort the failed merge
-		exec.Command("git", "-C", p.dir, "merge", "--abort").Run()
+		_ = exec.Command("git", "-C", p.dir, "merge", "--abort").Run()
 		return fmt.Errorf("merge failed (branch %s): %s: %w", branch, mergeStderr.String(), err)
 	}
 
@@ -187,7 +187,7 @@ func (p *ClaudeCodeProvider) mergeAndSync(sessionID, wtPath, branch string) erro
 	p.syncWorktrees(sessionID, baseBranch)
 
 	// Delete the merged branch
-	exec.Command("git", "-C", p.dir, "branch", "-d", branch).Run()
+	_ = exec.Command("git", "-C", p.dir, "branch", "-d", branch).Run()
 
 	return nil
 }
@@ -239,7 +239,7 @@ func (p *ClaudeCodeProvider) CreateSession(ctx context.Context) (*Session, error
 	if err := p.store.CreateClaudeSession(p.instID, id, "", wtPath, branch); err != nil {
 		// Clean up worktree if session DB insert fails
 		if wtPath != "" {
-			p.removeWorktree(wtPath)
+			_ = p.removeWorktree(wtPath)
 		}
 		return nil, err
 	}
@@ -426,12 +426,12 @@ func (p *ClaudeCodeProvider) DeleteSession(ctx context.Context, sessionID string
 
 	// Remove worktree
 	if cs.WorktreePath != "" {
-		p.removeWorktree(cs.WorktreePath)
+		_ = p.removeWorktree(cs.WorktreePath)
 	}
 
 	// Delete the branch
 	if cs.Branch != "" {
-		exec.Command("git", "-C", p.dir, "branch", "-D", cs.Branch).Run()
+		_ = exec.Command("git", "-C", p.dir, "branch", "-D", cs.Branch).Run()
 	}
 
 	return p.store.DeleteClaudeSession(sessionID)

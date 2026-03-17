@@ -41,7 +41,7 @@ func New(cfg *config.TelegramConfig, procMgr *process.Manager, st *store.Store) 
 				if !allowedUsers[update.Message.From.ID] {
 					return
 				}
-				if update.Message.Photo != nil && len(update.Message.Photo) > 0 {
+				if len(update.Message.Photo) > 0 {
 					slog.Info("default handler: treating as photo prompt")
 					handlers.HandlePhoto(ctx, b, update)
 				} else if update.Message.Text != "" {
