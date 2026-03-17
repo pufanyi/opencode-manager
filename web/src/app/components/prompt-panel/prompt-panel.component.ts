@@ -1,13 +1,4 @@
-import {
-  Component,
-  ElementRef,
-  Input,
-  NgZone,
-  OnChanges,
-  OnDestroy,
-  SimpleChanges,
-  ViewChild,
-} from '@angular/core';
+import { Component, ElementRef, Input, NgZone, OnChanges, OnDestroy, SimpleChanges, ViewChild, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { ApiService, Instance, Session, StreamEvent } from '../../services/api.service';
 
@@ -18,6 +9,9 @@ import { ApiService, Instance, Session, StreamEvent } from '../../services/api.s
   styleUrl: './prompt-panel.component.scss',
 })
 export class PromptPanelComponent implements OnChanges, OnDestroy {
+  private api = inject(ApiService);
+  private zone = inject(NgZone);
+
   @Input() instance: Instance | null = null;
   @ViewChild('responseArea') responseArea!: ElementRef<HTMLPreElement>;
 
@@ -28,11 +22,6 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
   streaming = false;
 
   private eventSource: EventSource | null = null;
-
-  constructor(
-    private api: ApiService,
-    private zone: NgZone,
-  ) {}
 
   ngOnChanges(changes: SimpleChanges): void {
     if (changes['instance']) {

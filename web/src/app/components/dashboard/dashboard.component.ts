@@ -1,4 +1,4 @@
-import { Component, OnDestroy, OnInit } from '@angular/core';
+import { Component, OnDestroy, OnInit, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Subscription } from 'rxjs';
 import { ApiService, Instance } from '../../services/api.service';
@@ -12,6 +12,8 @@ import { PromptPanelComponent } from '../prompt-panel/prompt-panel.component';
   styleUrl: './dashboard.component.scss',
 })
 export class DashboardComponent implements OnInit, OnDestroy {
+  private api = inject(ApiService);
+
   instances: Instance[] = [];
   selectedInstance: Instance | null = null;
   showNewForm = false;
@@ -21,8 +23,6 @@ export class DashboardComponent implements OnInit, OnDestroy {
   newProvider = 'claudecode';
 
   private sub!: Subscription;
-
-  constructor(private api: ApiService) {}
 
   ngOnInit(): void {
     this.sub = this.api.instances$.subscribe((list) => {

@@ -1,4 +1,4 @@
-<div class="card" (click)="selectInstance.emit(instance)">
+<div class="card" role="button" tabindex="0" (click)="selectInstance.emit(instance)" (keydown.enter)="selectInstance.emit(instance)">
   <div class="card-header">
     <div class="card-title-row">
       <span class="status-dot" [style.background]="statusColor"></span>
@@ -17,6 +17,7 @@
     }
   </div>
 
+  <!-- eslint-disable-next-line @angular-eslint/template/click-events-have-key-events, @angular-eslint/template/interactive-supports-focus -->
   <div class="card-actions" (click)="$event.stopPropagation()">
     @if (!isRunning) {
       <button class="btn-success btn-sm" (click)="startInstance.emit(instance)">Start</button>

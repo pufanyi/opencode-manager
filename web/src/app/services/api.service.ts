@@ -1,4 +1,4 @@
-import { Injectable, NgZone, OnDestroy } from '@angular/core';
+import { Injectable, inject, OnDestroy } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { BehaviorSubject, Observable, Subscription, timer } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
@@ -34,18 +34,17 @@ export interface StreamEvent {
 })
 export class ApiService implements OnDestroy {
   private readonly baseUrl = '/api';
+  private readonly http = inject(HttpClient);
   private readonly pollSub: Subscription;
 
   readonly instances$ = new BehaviorSubject<Instance[]>([]);
 
-  constructor(
-    private http: HttpClient,
-    private zone: NgZone,
-  ) {
+  constructor() {
     this.pollSub = timer(0, 5000)
       .pipe(switchMap(() => this.http.get<Instance[]>(`${this.baseUrl}/instances`)))
       .subscribe({
         next: (instances) => this.instances$.next(instances),
+        // eslint-disable-next-line @typescript-eslint/no-empty-function
         error: () => {},
       });
   }
