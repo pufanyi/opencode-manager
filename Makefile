@@ -1,4 +1,4 @@
-.PHONY: build run dev clean setup tidy web
+.PHONY: build run dev clean setup tidy web lint
 
 BINARY := opencode-manager
 BUILD_DIR := ./bin
@@ -8,7 +8,7 @@ setup: build
 	$(BUILD_DIR)/$(BINARY) setup
 
 web:
-	cd web && npx ng build --output-path ../internal/web/dist
+	cd web && pnpm ng build --output-path ../internal/web/dist
 
 build: web
 	go build -o $(BUILD_DIR)/$(BINARY) ./cmd/opencode-manager
@@ -18,9 +18,13 @@ run: build
 
 dev:
 	@echo "Building frontend..."
-	@cd web && npx ng build --output-path ../internal/web/dist 2>&1 | tail -5
+	@cd web && pnpm ng build --output-path ../internal/web/dist 2>&1 | tail -5
 	@echo "Building and running..."
 	@go build -o $(BUILD_DIR)/$(BINARY) ./cmd/opencode-manager && $(BUILD_DIR)/$(BINARY) -config $(CONFIG)
+
+lint:
+	cd web && pnpm biome check src/
+	golangci-lint run ./...
 
 clean:
 	rm -rf $(BUILD_DIR) internal/web/dist

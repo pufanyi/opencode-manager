@@ -1,7 +1,7 @@
-import { Routes } from '@angular/router';
-import { DashboardComponent } from './components/dashboard/dashboard.component';
+import type { Routes } from "@angular/router";
+import { DashboardComponent } from "./components/dashboard/dashboard.component";
 
 export const routes: Routes = [
-  { path: '', component: DashboardComponent },
-  { path: '**', redirectTo: '' },
+  { path: "", component: DashboardComponent },
+  { path: "**", redirectTo: "" },
 ];

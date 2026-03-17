@@ -1,15 +1,15 @@
-import { Component, OnDestroy, OnInit, inject } from '@angular/core';
-import { FormsModule } from '@angular/forms';
-import { Subscription } from 'rxjs';
-import { ApiService, Instance } from '../../services/api.service';
-import { InstanceCardComponent } from '../instance-card/instance-card.component';
-import { PromptPanelComponent } from '../prompt-panel/prompt-panel.component';
+import { Component, inject, type OnDestroy, type OnInit } from "@angular/core";
+import { FormsModule } from "@angular/forms";
+import type { Subscription } from "rxjs";
+import { ApiService, type Instance } from "../../services/api.service";
+import { InstanceCardComponent } from "../instance-card/instance-card.component";
+import { PromptPanelComponent } from "../prompt-panel/prompt-panel.component";
 
 @Component({
-  selector: 'app-dashboard',
+  selector: "app-dashboard",
   imports: [FormsModule, InstanceCardComponent, PromptPanelComponent],
-  templateUrl: './dashboard.component.html',
-  styleUrl: './dashboard.component.scss',
+  templateUrl: "./dashboard.component.html",
+  styleUrl: "./dashboard.component.scss",
 })
 export class DashboardComponent implements OnInit, OnDestroy {
   private api = inject(ApiService);
@@ -18,9 +18,9 @@ export class DashboardComponent implements OnInit, OnDestroy {
   selectedInstance: Instance | null = null;
   showNewForm = false;
 
-  newName = '';
-  newDirectory = '';
-  newProvider = 'claudecode';
+  newName = "";
+  newDirectory = "";
+  newProvider = "claudecode";
 
   private sub!: Subscription;
 
@@ -93,8 +93,8 @@ export class DashboardComponent implements OnInit, OnDestroy {
   }
 
   private resetForm(): void {
-    this.newName = '';
-    this.newDirectory = '';
-    this.newProvider = 'claudecode';
+    this.newName = "";
+    this.newDirectory = "";
+    this.newProvider = "claudecode";
   }
 }

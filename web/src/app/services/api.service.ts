@@ -1,7 +1,7 @@
-import { Injectable, inject, OnDestroy } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
-import { BehaviorSubject, Observable, Subscription, timer } from 'rxjs';
-import { switchMap } from 'rxjs/operators';
+import { HttpClient } from "@angular/common/http";
+import { Injectable, inject, type OnDestroy } from "@angular/core";
+import { BehaviorSubject, type Observable, type Subscription, timer } from "rxjs";
+import { switchMap } from "rxjs/operators";
 
 export interface Instance {
   id: string;
@@ -30,10 +30,10 @@ export interface StreamEvent {
 }
 
 @Injectable({
-  providedIn: 'root',
+  providedIn: "root",
 })
 export class ApiService implements OnDestroy {
-  private readonly baseUrl = '/api';
+  private readonly baseUrl = "/api";
   private readonly http = inject(HttpClient);
   private readonly pollSub: Subscription;
 
@@ -80,16 +80,11 @@ export class ApiService implements OnDestroy {
   }
 
   getSessions(instanceId: string): Observable<Session[]> {
-    return this.http.get<Session[]>(
-      `${this.baseUrl}/instances/${instanceId}/sessions`,
-    );
+    return this.http.get<Session[]>(`${this.baseUrl}/instances/${instanceId}/sessions`);
   }
 
   createSession(instanceId: string): Observable<Session> {
-    return this.http.post<Session>(
-      `${this.baseUrl}/sessions/${instanceId}/new`,
-      {},
-    );
+    return this.http.post<Session>(`${this.baseUrl}/sessions/${instanceId}/new`, {});
   }
 
   sendPrompt(body: {
@@ -100,10 +95,7 @@ export class ApiService implements OnDestroy {
     return this.http.post(`${this.baseUrl}/prompt`, body);
   }
 
-  abortPrompt(body: {
-    instance_id: string;
-    session_id: string;
-  }): Observable<unknown> {
+  abortPrompt(body: { instance_id: string; session_id: string }): Observable<unknown> {
     return this.http.post(`${this.baseUrl}/abort`, body);
   }
 

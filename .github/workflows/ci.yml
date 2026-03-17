@@ -17,43 +17,50 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Need the Angular dist for embed to work
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
 
       - name: Build frontend
-        run: cd web && npm ci && npx ng build --output-path ../internal/web/dist
+        run: cd web && pnpm install --frozen-lockfile && pnpm ng build --output-path ../internal/web/dist
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
 
-  lint-angular:
-    name: Angular Lint
+  lint-frontend:
+    name: Frontend Lint (Biome)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
 
       - name: Install
-        run: cd web && npm ci
+        run: cd web && pnpm install --frozen-lockfile
 
-      - name: Lint
-        run: cd web && npx ng lint
+      - name: Biome check
+        run: cd web && pnpm biome check src/
 
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [lint-go, lint-angular]
+    needs: [lint-go, lint-frontend]
     steps:
       - uses: actions/checkout@v4
 
@@ -61,14 +68,18 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
 
       - name: Build frontend
-        run: cd web && npm ci && npx ng build --output-path ../internal/web/dist
+        run: cd web && pnpm install --frozen-lockfile && pnpm ng build --output-path ../internal/web/dist
 
       - name: Build binary
         run: go build -o bin/opencode-manager ./cmd/opencode-manager

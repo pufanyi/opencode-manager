@@ -1,34 +1,49 @@
-import { Component, ElementRef, Input, NgZone, OnChanges, OnDestroy, SimpleChanges, ViewChild, inject } from '@angular/core';
-import { FormsModule } from '@angular/forms';
-import { ApiService, Instance, Session, StreamEvent } from '../../services/api.service';
+import {
+  Component,
+  type ElementRef,
+  Input,
+  inject,
+  NgZone,
+  type OnChanges,
+  type OnDestroy,
+  type SimpleChanges,
+  ViewChild,
+} from "@angular/core";
+import { FormsModule } from "@angular/forms";
+import {
+  ApiService,
+  type Instance,
+  type Session,
+  type StreamEvent,
+} from "../../services/api.service";
 
 @Component({
-  selector: 'app-prompt-panel',
+  selector: "app-prompt-panel",
   imports: [FormsModule],
-  templateUrl: './prompt-panel.component.html',
-  styleUrl: './prompt-panel.component.scss',
+  templateUrl: "./prompt-panel.component.html",
+  styleUrl: "./prompt-panel.component.scss",
 })
 export class PromptPanelComponent implements OnChanges, OnDestroy {
   private api = inject(ApiService);
   private zone = inject(NgZone);
 
   @Input() instance: Instance | null = null;
-  @ViewChild('responseArea') responseArea!: ElementRef<HTMLPreElement>;
+  @ViewChild("responseArea") responseArea!: ElementRef<HTMLPreElement>;
 
   sessions: Session[] = [];
-  selectedSessionId = '';
-  promptText = '';
-  responseText = '';
+  selectedSessionId = "";
+  promptText = "";
+  responseText = "";
   streaming = false;
 
   private eventSource: EventSource | null = null;
 
   ngOnChanges(changes: SimpleChanges): void {
-    if (changes['instance']) {
+    if (changes["instance"]) {
       this.closeSSE();
       this.sessions = [];
-      this.selectedSessionId = '';
-      this.responseText = '';
+      this.selectedSessionId = "";
+      this.responseText = "";
       this.streaming = false;
       if (this.instance) {
         this.loadSessions();
@@ -62,21 +77,21 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
       next: (session) => {
         this.sessions = [...this.sessions, session];
         this.selectedSessionId = session.ID;
-        this.responseText = '';
+        this.responseText = "";
         this.connectSSE();
       },
     });
   }
 
   onSessionChange(): void {
-    this.responseText = '';
+    this.responseText = "";
     this.connectSSE();
   }
 
   sendPrompt(): void {
     if (!this.instance || !this.selectedSessionId || !this.promptText.trim()) return;
     this.streaming = true;
-    this.responseText = '';
+    this.responseText = "";
     this.api
       .sendPrompt({
         instance_id: this.instance.id,
@@ -88,7 +103,7 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
           this.streaming = false;
         },
       });
-    this.promptText = '';
+    this.promptText = "";
   }
 
   abort(): void {
@@ -106,7 +121,7 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
   }
 
   onKeyDown(event: KeyboardEvent): void {
-    if (event.key === 'Enter' && !event.shiftKey) {
+    if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       this.sendPrompt();
     }
@@ -130,7 +145,7 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
           } else if (evt.Text) {
             this.responseText += evt.Text;
           } else if (evt.ToolName) {
-            const state = evt.ToolState ?? '';
+            const state = evt.ToolState ?? "";
             this.responseText += `\n[Tool: ${evt.ToolName}] ${state}\n`;
           }
 

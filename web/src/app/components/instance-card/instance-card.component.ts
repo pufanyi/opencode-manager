@@ -1,11 +1,11 @@
-import { Component, EventEmitter, Input, Output } from '@angular/core';
-import { Instance } from '../../services/api.service';
+import { Component, EventEmitter, Input, Output } from "@angular/core";
+import type { Instance } from "../../services/api.service";
 
 @Component({
-  selector: 'app-instance-card',
+  selector: "app-instance-card",
   imports: [],
-  templateUrl: './instance-card.component.html',
-  styleUrl: './instance-card.component.scss',
+  templateUrl: "./instance-card.component.html",
+  styleUrl: "./instance-card.component.scss",
 })
 export class InstanceCardComponent {
   @Input({ required: true }) instance!: Instance;
@@ -16,20 +16,20 @@ export class InstanceCardComponent {
 
   get statusColor(): string {
     switch (this.instance.status) {
-      case 'running':
-        return 'var(--accent-green)';
-      case 'stopped':
-        return 'var(--accent-red)';
+      case "running":
+        return "var(--accent-green)";
+      case "stopped":
+        return "var(--accent-red)";
       default:
-        return 'var(--accent-yellow)';
+        return "var(--accent-yellow)";
     }
   }
 
   get providerBadge(): string {
-    return this.instance.provider_type === 'claudecode' ? 'CC' : 'OC';
+    return this.instance.provider_type === "claudecode" ? "CC" : "OC";
   }
 
   get isRunning(): boolean {
-    return this.instance.status === 'running';
+    return this.instance.status === "running";
   }
 }
