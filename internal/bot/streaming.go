@@ -33,8 +33,8 @@ type boardEntry struct {
 	taskID       int
 	instanceName string
 	sessionTitle string
-	location     string        // e.g. "🌿 worktree" or "📂 main dir"
-	tools        []toolStatus  // recent tools for display (completed + running)
+	location     string       // e.g. "🌿 worktree" or "📂 main dir"
+	tools        []toolStatus // recent tools for display (completed + running)
 	elapsed      time.Duration
 }
 
@@ -75,12 +75,12 @@ type StreamManager struct {
 	nextID    int
 
 	// Status board
-	b              *bot.Bot
-	boardMu        sync.Mutex
-	boardMsgs      map[int64]int    // chatID -> board message ID
-	boardContent   map[int64]string // chatID -> last sent content
-	boardRepos     map[int64]bool   // chatID -> needs reposition (new msg appeared)
-	boardStarted   bool
+	b            *bot.Bot
+	boardMu      sync.Mutex
+	boardMsgs    map[int64]int    // chatID -> board message ID
+	boardContent map[int64]string // chatID -> last sent content
+	boardRepos   map[int64]bool   // chatID -> needs reposition (new msg appeared)
+	boardStarted bool
 }
 
 func NewStreamManager() *StreamManager {
@@ -398,9 +398,9 @@ func (sc *StreamContext) sendSingleMessage(fullContent, rawContent string, semap
 	defer func() { <-semaphore }()
 
 	params := &bot.SendMessageParams{
-		ChatID:      sc.chatID,
-		Text:        fullContent,
-		ParseMode:   models.ParseModeHTML,
+		ChatID:    sc.chatID,
+		Text:      fullContent,
+		ParseMode: models.ParseModeHTML,
 	}
 	if sc.replyToMessageID != 0 {
 		params.ReplyParameters = &models.ReplyParameters{
@@ -475,9 +475,9 @@ func (sc *StreamContext) sendSplitResponse(fullContent, rawContent, header strin
 
 	semaphore <- struct{}{}
 	contParams := &bot.SendMessageParams{
-		ChatID:      sc.chatID,
-		Text:        contText,
-		ParseMode:   models.ParseModeHTML,
+		ChatID:    sc.chatID,
+		Text:      contText,
+		ParseMode: models.ParseModeHTML,
 	}
 	msg2, err := sc.b.SendMessage(context.Background(), contParams)
 	<-semaphore
@@ -558,7 +558,9 @@ func (sm *StreamManager) refreshBoard() {
 			if len(completed) > maxCompleted {
 				completed = completed[len(completed)-maxCompleted:]
 			}
-			display := append(completed, running...)
+			display := make([]toolStatus, 0, len(completed)+len(running))
+			display = append(display, completed...)
+			display = append(display, running...)
 			if len(display) > 6 {
 				display = display[len(display)-6:]
 			}

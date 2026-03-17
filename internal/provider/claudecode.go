@@ -216,7 +216,7 @@ func (p *ClaudeCodeProvider) syncWorktrees(excludeSessionID, baseBranch string) 
 		if err := rebaseCmd.Run(); err != nil {
 			slog.Warn("rebase failed for worktree, aborting rebase",
 				"session", s.ID[:12], "error", stderr.String())
-			exec.Command("git", "-C", s.WorktreePath, "rebase", "--abort").Run()
+			_ = exec.Command("git", "-C", s.WorktreePath, "rebase", "--abort").Run()
 		} else {
 			slog.Info("synced worktree", "session", s.ID[:12])
 		}
