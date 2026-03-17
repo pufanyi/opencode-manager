@@ -143,6 +143,9 @@ func sanitizeForTelegram(html string) string {
 	}
 	html = strings.TrimSpace(html)
 
+	// Balance tags to ensure all are properly closed/nested
+	html = balanceHTML(html)
+
 	return html
 }
 
@@ -170,6 +173,150 @@ func stripUnsupportedTags(html string) string {
 		}
 		return ""
 	})
+}
+
+// balanceHTML ensures all HTML tags are properly closed and nested.
+// It closes unclosed tags at the end, removes orphaned closing tags,
+// and fixes nesting violations (e.g., <strong> inside <code>).
+func balanceHTML(html string) string {
+	// Tags that cannot contain formatting (bold/italic/etc.)
+	noFormatTags := map[string]bool{"code": true, "pre": true}
+	formatTags := map[string]bool{
+		"b": true, "strong": true, "i": true, "em": true,
+		"u": true, "ins": true, "s": true, "strike": true, "del": true,
+	}
+
+	var result strings.Builder
+	var stack []string // open tag names
+	i := 0
+
+	for i < len(html) {
+		// Find next tag
+		tagStart := strings.Index(html[i:], "<")
+		if tagStart == -1 {
+			result.WriteString(html[i:])
+			break
+		}
+		tagStart += i
+
+		// Write text before the tag
+		result.WriteString(html[i:tagStart])
+
+		tagEnd := strings.Index(html[tagStart:], ">")
+		if tagEnd == -1 {
+			// Incomplete tag at end — strip it
+			break
+		}
+		tagEnd += tagStart + 1
+		tag := html[tagStart:tagEnd]
+
+		matches := anyTagRe.FindStringSubmatch(tag)
+		if matches == nil {
+			// Not a recognized tag pattern (e.g., &lt;), pass through
+			result.WriteString(tag)
+			i = tagEnd
+			continue
+		}
+
+		isClosing := matches[1] == "/"
+		tagName := strings.ToLower(matches[2])
+
+		if !isClosing {
+			// Check for nesting violation: format tag inside code/pre
+			inNoFormat := false
+			for _, s := range stack {
+				if noFormatTags[s] {
+					inNoFormat = true
+					break
+				}
+			}
+			if inNoFormat && formatTags[tagName] {
+				// Skip this tag — can't nest formatting inside code/pre
+				i = tagEnd
+				continue
+			}
+
+			// Self-closing tags (like <br/>, <hr/>, <img/>) don't go on stack
+			if !strings.HasSuffix(strings.TrimSpace(tag[:len(tag)-1]), "/") {
+				stack = append(stack, tagName)
+			}
+			result.WriteString(tag)
+		} else {
+			// Find matching open tag on stack
+			found := -1
+			for j := len(stack) - 1; j >= 0; j-- {
+				if stack[j] == tagName {
+					found = j
+					break
+				}
+			}
+			if found == -1 {
+				// Orphaned closing tag — skip it
+				i = tagEnd
+				continue
+			}
+
+			// Close any tags that were opened after the matching one
+			for j := len(stack) - 1; j > found; j-- {
+				result.WriteString(fmt.Sprintf("</%s>", stack[j]))
+			}
+			result.WriteString(tag)
+			stack = stack[:found]
+		}
+
+		i = tagEnd
+	}
+
+	// Close remaining unclosed tags in reverse order
+	for j := len(stack) - 1; j >= 0; j-- {
+		result.WriteString(fmt.Sprintf("</%s>", stack[j]))
+	}
+
+	return result.String()
+}
+
+// truncateHTML truncates HTML content to maxBytes without breaking tags.
+// It finds a safe cut point before maxBytes, then closes any unclosed tags.
+func truncateHTML(html string, maxBytes int) string {
+	if len(html) <= maxBytes {
+		return html
+	}
+
+	// Find a safe cut point: not inside a tag
+	cut := maxBytes
+	// If we're inside a tag (between < and >), back up to before the <
+	for j := cut - 1; j >= 0; j-- {
+		if html[j] == '>' {
+			break // We're not inside a tag
+		}
+		if html[j] == '<' {
+			cut = j // Cut before this incomplete tag
+			break
+		}
+	}
+
+	// Also ensure we don't cut in the middle of an HTML entity (&amp; etc.)
+	for cut > 0 && html[cut-1] == '&' {
+		cut--
+	}
+	// Check if we're inside an entity (between & and ;)
+	for j := cut - 1; j >= 0 && j > cut-10; j-- {
+		if html[j] == ';' || html[j] == ' ' || html[j] == '\n' {
+			break
+		}
+		if html[j] == '&' {
+			cut = j
+			break
+		}
+	}
+
+	// UTF-8 safe
+	for cut > 0 && !utf8.RuneStart(html[cut]) {
+		cut--
+	}
+
+	truncated := html[:cut]
+	return balanceHTML(truncated)
 }
 
 // toolIcon returns the emoji for a tool state.

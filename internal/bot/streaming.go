@@ -278,7 +278,7 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 // flushDraft sends updates via sendMessageDraft, finalizes with sendMessage when done.
 func (sc *StreamContext) flushDraft(fullContent, rawContent string, final bool, semaphore chan struct{}) {
 	if len(fullContent) > maxMessageLen {
-		fullContent = truncateUTF8(fullContent, maxMessageLen-10) + "\n..."
+		fullContent = truncateHTML(fullContent, maxMessageLen-10) + "\n..."
 	}
 
 	semaphore <- struct{}{}
@@ -407,7 +407,7 @@ func (sc *StreamContext) handleLongMessage(header, fullContent, rawContent strin
 	available := maxMessageLen - len(header) - 20
 	body := fullContent[len(header):]
 	if len(body) > available {
-		body = truncateUTF8(body, available)
+		body = truncateHTML(body, available)
 	}
 	truncated := header + body + "\n..."
 
@@ -437,7 +437,7 @@ func (sc *StreamContext) handleLongMessage(header, fullContent, rawContent strin
 		return
 	}
 	if len(remaining) > maxMessageLen-len(header)-20 {
-		remaining = truncateUTF8(remaining, maxMessageLen-len(header)-20) + "\n..."
+		remaining = truncateHTML(remaining, maxMessageLen-len(header)-20) + "\n..."
 	}
 
 	semaphore <- struct{}{}
