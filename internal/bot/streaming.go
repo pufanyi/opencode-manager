@@ -16,8 +16,8 @@ import (
 const (
 	maxMessageLen   = 4096
 	fileFallbackLen = 12000
-	editInterval    = 1500 * time.Millisecond
-	draftInterval   = 500 * time.Millisecond
+	editInterval  = 5 * time.Second
+	draftInterval = 2 * time.Second
 )
 
 // toolStatus tracks a single tool invocation's display state.
@@ -154,27 +154,6 @@ func (sc *StreamContext) updateTool(name, state string) {
 	sc.tools = append(sc.tools, toolStatus{Name: name, State: state})
 }
 
-// buildContent combines text and tool statuses into the display string.
-func (sc *StreamContext) buildContent() string {
-	var sb strings.Builder
-	sb.WriteString(sc.textContent)
-
-	for _, t := range sc.tools {
-		icon := "🔧"
-		switch t.State {
-		case "running", "pending":
-			icon = "⏳"
-		case "completed":
-			icon = "✅"
-		case "error":
-			icon = "❌"
-		}
-		sb.WriteString(fmt.Sprintf("\n%s `%s`", icon, t.Name))
-	}
-
-	return sb.String()
-}
-
 func (sc *StreamContext) flushLoop(ctx context.Context, semaphore chan struct{}) {
 	interval := editInterval
 	if sc.useDraft {
@@ -191,7 +170,6 @@ func (sc *StreamContext) flushLoop(ctx context.Context, semaphore chan struct{})
 			return
 		case <-ticker.C:
 			if sc.isDone() {
-				// Final flush with final=true to finalize draft / add keyboard
 				sc.flush(semaphore, true)
 				return
 			}
@@ -213,26 +191,51 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 		return
 	}
 	sc.dirty = false
-	content := sc.buildContent()
+	text := sc.textContent
+	tools := make([]toolStatus, len(sc.tools))
+	copy(tools, sc.tools)
 	done := sc.done
 	sc.mu.Unlock()
 
-	if content == "" {
+	if text == "" && len(tools) == 0 {
 		return
 	}
 
-	header := fmt.Sprintf("<b>[%s]</b>\n\n", escapeHTML(sc.instanceName))
-	rendered := markdownToTelegramHTML(content)
+	// --- Build HTML content ---
+	header := fmt.Sprintf("<b>[%s]</b>", escapeHTML(sc.instanceName))
+	toolsHTML := formatToolsHTML(tools)
 
-	// If rendered is empty but content is not, fall back to escaped HTML
-	if rendered == "" && content != "" {
-		rendered = escapeHTML(content)
+	var renderedText string
+	if text != "" {
+		renderedText = sanitizeForTelegram(markdownToTelegramHTML(text))
+		if renderedText == "" {
+			renderedText = escapeHTML(text)
+		}
 	}
 
-	fullContent := header + rendered
+	// Assemble: header + tools (top) + text
+	fullContent := header
+	if toolsHTML != "" {
+		fullContent += "\n" + toolsHTML
+	}
+	if renderedText != "" {
+		fullContent += "\n\n" + renderedText
+	}
 
+	// --- Build plain-text fallback ---
+	toolsPlain := formatToolsPlain(tools)
+	var rawParts []string
+	if toolsPlain != "" {
+		rawParts = append(rawParts, toolsPlain)
+	}
+	if text != "" {
+		rawParts = append(rawParts, text)
+	}
+	rawContent := strings.Join(rawParts, "\n\n")
+
+	// --- Dispatch ---
 	if len(fullContent) > fileFallbackLen {
-		sc.sendAsFile(content)
+		sc.sendAsFile(rawContent)
 		if sc.useDraft {
 			sc.finalizeDraft("")
 		}
@@ -240,9 +243,9 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 	}
 
 	if sc.useDraft {
-		sc.flushDraft(fullContent, content, done || final, semaphore)
+		sc.flushDraft(fullContent, rawContent, done || final, semaphore)
 	} else {
-		sc.flushEdit(fullContent, content, header, done || final, semaphore)
+		sc.flushEdit(fullContent, rawContent, header, done || final, semaphore)
 	}
 }
 
@@ -270,7 +273,6 @@ func (sc *StreamContext) flushDraft(fullContent, rawContent string, final bool, 
 		if err != nil {
 			slog.Warn("draft failed, falling back to edit", "error", err)
 			sc.useDraft = false
-			// Immediately try edit fallback so content isn't lost
 			sc.doEdit(fullContent, rawContent, false)
 		}
 		return
@@ -296,9 +298,11 @@ func (sc *StreamContext) finalizeDraft(fullContent string) {
 	msg, err := sc.b.SendMessage(context.Background(), params)
 	if err != nil {
 		slog.Warn("finalize draft with HTML failed, retrying plain text", "error", err)
-		// Retry without HTML parse mode
 		params.ParseMode = ""
 		params.Text = fmt.Sprintf("[%s]\n\n%s", sc.instanceName, stripHTML(fullContent))
+		if len(params.Text) > maxMessageLen {
+			params.Text = params.Text[:maxMessageLen-10] + "\n..."
+		}
 		msg, err = sc.b.SendMessage(context.Background(), params)
 		if err != nil {
 			slog.Error("finalize draft failed completely", "error", err)
@@ -352,7 +356,6 @@ func (sc *StreamContext) doEdit(fullContent, rawContent string, final bool) {
 
 	_, err := sc.b.EditMessageText(context.Background(), params)
 	if err != nil {
-		// Check if it's a "message is not modified" error (benign)
 		errStr := err.Error()
 		if strings.Contains(errStr, "message is not modified") {
 			return
@@ -360,7 +363,6 @@ func (sc *StreamContext) doEdit(fullContent, rawContent string, final bool) {
 
 		slog.Warn("edit message failed with HTML, retrying plain text", "error", err, "msgID", msgID)
 
-		// Retry with plain text fallback
 		plainHeader := fmt.Sprintf("[%s]\n\n", sc.instanceName)
 		plainContent := plainHeader + rawContent
 		if len(plainContent) > maxMessageLen {
@@ -377,11 +379,11 @@ func (sc *StreamContext) doEdit(fullContent, rawContent string, final bool) {
 
 func (sc *StreamContext) handleLongMessage(header, fullContent, rawContent string, semaphore chan struct{}) {
 	available := maxMessageLen - len(header) - 20
-	rendered := fullContent[len(header):]
-	if len(rendered) > available {
-		rendered = rendered[:available]
+	body := fullContent[len(header):]
+	if len(body) > available {
+		body = body[:available]
 	}
-	truncated := header + rendered + "\n..."
+	truncated := header + body + "\n..."
 
 	semaphore <- struct{}{}
 
@@ -404,7 +406,7 @@ func (sc *StreamContext) handleLongMessage(header, fullContent, rawContent strin
 
 	<-semaphore
 
-	remaining := fullContent[len(header)+len(rendered):]
+	remaining := fullContent[len(header)+len(body):]
 	if remaining == "" {
 		return
 	}
