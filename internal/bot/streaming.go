@@ -74,11 +74,12 @@ type StreamManager struct {
 	nextID    int
 
 	// Status board
-	b            *bot.Bot
-	boardMu      sync.Mutex
-	boardMsgs    map[int64]int    // chatID -> board message ID
-	boardContent map[int64]string // chatID -> last sent content
-	boardStarted bool
+	b              *bot.Bot
+	boardMu        sync.Mutex
+	boardMsgs      map[int64]int    // chatID -> board message ID
+	boardContent   map[int64]string // chatID -> last sent content
+	boardRepos     map[int64]bool   // chatID -> needs reposition (new msg appeared)
+	boardStarted   bool
 }
 
 func NewStreamManager() *StreamManager {
@@ -88,6 +89,7 @@ func NewStreamManager() *StreamManager {
 		semaphore:    make(chan struct{}, 25),
 		boardMsgs:    make(map[int64]int),
 		boardContent: make(map[int64]string),
+		boardRepos:   make(map[int64]bool),
 	}
 }
 
@@ -133,7 +135,8 @@ func (sm *StreamManager) StartStream(b *bot.Bot, st *store.Store, chatID int64, 
 	go sc.consumeStream(ctx, ch)
 	go sc.flushLoop(ctx, sm.semaphore)
 
-	// Immediate board update to show new task
+	// New message (user prompt) appeared — reposition board to bottom
+	sm.NotifyNewMessage(chatID)
 	go sm.refreshBoard()
 
 	return sc
@@ -184,6 +187,14 @@ func (sm *StreamManager) StopTask(taskID int) bool {
 	}
 	go sm.refreshBoard()
 	return true
+}
+
+// NotifyNewMessage marks a chat as needing the board repositioned to the bottom.
+// Call this whenever a new message is sent to the chat (response, merge notification, etc.).
+func (sm *StreamManager) NotifyNewMessage(chatID int64) {
+	sm.boardMu.Lock()
+	sm.boardRepos[chatID] = true
+	sm.boardMu.Unlock()
 }
 
 // onStreamDone is called by flushLoop when a stream finishes naturally.
@@ -302,6 +313,7 @@ func (sc *StreamContext) sendMergeNotification(text string) {
 	if err != nil {
 		slog.Warn("failed to send merge notification", "error", err)
 	}
+	sc.manager.NotifyNewMessage(sc.chatID)
 }
 
 // cleanup removes any temp files registered via AddCleanupFile.
@@ -404,6 +416,7 @@ func (sc *StreamContext) sendSingleMessage(fullContent, rawContent string, semap
 	if sc.store != nil && msg != nil {
 		_ = sc.store.SetMessageSession(sc.chatID, msg.ID, sc.sessionID)
 	}
+	sc.manager.NotifyNewMessage(sc.chatID)
 }
 
 // sendSplitResponse sends a long response as two messages.
@@ -465,6 +478,7 @@ func (sc *StreamContext) sendSplitResponse(fullContent, rawContent, header strin
 	if sc.store != nil {
 		_ = sc.store.SetMessageSession(sc.chatID, msg2.ID, sc.sessionID)
 	}
+	sc.manager.NotifyNewMessage(sc.chatID)
 }
 
 func (sc *StreamContext) sendAsFile(content string) {
@@ -489,6 +503,7 @@ func (sc *StreamContext) sendAsFile(content string) {
 	if err != nil {
 		slog.Error("failed to send file", "error", err)
 	}
+	sc.manager.NotifyNewMessage(sc.chatID)
 }
 
 // ---------------------------------------------------------------------------
@@ -544,38 +559,80 @@ func (sm *StreamManager) refreshBoard() {
 	for chatID, entries := range chatEntries {
 		content := buildBoardHTML(entries)
 		keyboard := boardKeyboard(entries)
+		needRepos := sm.boardRepos[chatID]
+		oldID := sm.boardMsgs[chatID]
+		contentChanged := sm.boardContent[chatID] != content
 
-		if sm.boardContent[chatID] == content {
+		if !contentChanged && !needRepos {
 			continue
 		}
 
-		// Always delete the old board and send a new one so it stays at
-		// the bottom of the chat (the most recent message).
-		if oldID := sm.boardMsgs[chatID]; oldID != 0 {
+		if needRepos {
+			delete(sm.boardRepos, chatID)
+		}
+
+		// If a new message appeared, delete+resend to keep board at bottom.
+		// Otherwise, just edit in place.
+		if needRepos || oldID == 0 {
+			if oldID != 0 {
+				sm.semaphore <- struct{}{}
+				_, _ = b.DeleteMessage(context.Background(), &bot.DeleteMessageParams{
+					ChatID:    chatID,
+					MessageID: oldID,
+				})
+				<-sm.semaphore
+			}
+
 			sm.semaphore <- struct{}{}
-			_, _ = b.DeleteMessage(context.Background(), &bot.DeleteMessageParams{
-				ChatID:    chatID,
-				MessageID: oldID,
+			msg, err := b.SendMessage(context.Background(), &bot.SendMessageParams{
+				ChatID:              chatID,
+				Text:                content,
+				ParseMode:           models.ParseModeHTML,
+				DisableNotification: true,
+				ReplyMarkup:         keyboard,
 			})
 			<-sm.semaphore
+			if err != nil {
+				slog.Warn("failed to send board message", "error", err)
+				delete(sm.boardMsgs, chatID)
+				continue
+			}
+			sm.boardMsgs[chatID] = msg.ID
+			sm.boardContent[chatID] = content
+		} else {
+			// Edit existing board message in place
+			sm.semaphore <- struct{}{}
+			_, err := b.EditMessageText(context.Background(), &bot.EditMessageTextParams{
+				ChatID:      chatID,
+				MessageID:   oldID,
+				Text:        content,
+				ParseMode:   models.ParseModeHTML,
+				ReplyMarkup: keyboard,
+			})
+			<-sm.semaphore
+			if err != nil {
+				slog.Warn("failed to edit board message, will resend", "error", err)
+				// Fallback: delete and resend
+				_, _ = b.DeleteMessage(context.Background(), &bot.DeleteMessageParams{
+					ChatID:    chatID,
+					MessageID: oldID,
+				})
+				msg, err := b.SendMessage(context.Background(), &bot.SendMessageParams{
+					ChatID:              chatID,
+					Text:                content,
+					ParseMode:           models.ParseModeHTML,
+					DisableNotification: true,
+					ReplyMarkup:         keyboard,
+				})
+				if err != nil {
+					slog.Warn("failed to resend board message", "error", err)
+					delete(sm.boardMsgs, chatID)
+					continue
+				}
+				sm.boardMsgs[chatID] = msg.ID
+			}
+			sm.boardContent[chatID] = content
 		}
-
-		sm.semaphore <- struct{}{}
-		msg, err := b.SendMessage(context.Background(), &bot.SendMessageParams{
-			ChatID:              chatID,
-			Text:                content,
-			ParseMode:           models.ParseModeHTML,
-			DisableNotification: true,
-			ReplyMarkup:         keyboard,
-		})
-		<-sm.semaphore
-		if err != nil {
-			slog.Warn("failed to send board message", "error", err)
-			delete(sm.boardMsgs, chatID)
-			continue
-		}
-		sm.boardMsgs[chatID] = msg.ID
-		sm.boardContent[chatID] = content
 	}
 
 	// Clean up boards for chats with no active streams
