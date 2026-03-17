@@ -316,7 +316,7 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ch, err := inst.Provider.Prompt(r.Context(), req.SessionID, req.Content)
+	ch, err := inst.Provider.Prompt(context.Background(), req.SessionID, req.Content)
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return

@@ -143,7 +143,7 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
             this.responseText += `\n[ERROR] ${evt.Error}\n`;
             this.streaming = false;
           } else if (evt.Text) {
-            this.responseText += evt.Text;
+            this.responseText = evt.Text;
           } else if (evt.ToolName) {
             const state = evt.ToolState ?? "";
             this.responseText += `\n[Tool: ${evt.ToolName}] ${state}\n`;

@@ -16,8 +16,8 @@ import (
 const (
 	maxMessageLen   = 4096
 	fileFallbackLen = 12000
-	editInterval  = 5 * time.Second
-	draftInterval = 2 * time.Second
+	editInterval    = 5 * time.Second
+	draftInterval   = 2 * time.Second
 )
 
 // toolStatus tracks a single tool invocation's display state.
@@ -207,7 +207,7 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 
 	var renderedText string
 	if text != "" {
-		renderedText = sanitizeForTelegram(markdownToTelegramHTML(text))
+		renderedText = markdownToTelegramHTML(text)
 		if renderedText == "" {
 			renderedText = escapeHTML(text)
 		}
@@ -252,7 +252,7 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 // flushDraft sends updates via sendMessageDraft, finalizes with sendMessage when done.
 func (sc *StreamContext) flushDraft(fullContent, rawContent string, final bool, semaphore chan struct{}) {
 	if len(fullContent) > maxMessageLen {
-		fullContent = fullContent[:maxMessageLen-10] + "\n..."
+		fullContent = truncateUTF8(fullContent, maxMessageLen-10) + "\n..."
 	}
 
 	semaphore <- struct{}{}
@@ -301,7 +301,7 @@ func (sc *StreamContext) finalizeDraft(fullContent string) {
 		params.ParseMode = ""
 		params.Text = fmt.Sprintf("[%s]\n\n%s", sc.instanceName, stripHTML(fullContent))
 		if len(params.Text) > maxMessageLen {
-			params.Text = params.Text[:maxMessageLen-10] + "\n..."
+			params.Text = truncateUTF8(params.Text, maxMessageLen-10) + "\n..."
 		}
 		msg, err = sc.b.SendMessage(context.Background(), params)
 		if err != nil {
@@ -366,7 +366,7 @@ func (sc *StreamContext) doEdit(fullContent, rawContent string, final bool) {
 		plainHeader := fmt.Sprintf("[%s]\n\n", sc.instanceName)
 		plainContent := plainHeader + rawContent
 		if len(plainContent) > maxMessageLen {
-			plainContent = plainContent[:maxMessageLen-10] + "\n..."
+			plainContent = truncateUTF8(plainContent, maxMessageLen-10) + "\n..."
 		}
 		params.ParseMode = ""
 		params.Text = plainContent
@@ -381,7 +381,7 @@ func (sc *StreamContext) handleLongMessage(header, fullContent, rawContent strin
 	available := maxMessageLen - len(header) - 20
 	body := fullContent[len(header):]
 	if len(body) > available {
-		body = body[:available]
+		body = truncateUTF8(body, available)
 	}
 	truncated := header + body + "\n..."
 
@@ -411,7 +411,7 @@ func (sc *StreamContext) handleLongMessage(header, fullContent, rawContent strin
 		return
 	}
 	if len(remaining) > maxMessageLen-len(header)-20 {
-		remaining = remaining[:maxMessageLen-len(header)-20] + "\n..."
+		remaining = truncateUTF8(remaining, maxMessageLen-len(header)-20) + "\n..."
 	}
 
 	semaphore <- struct{}{}
