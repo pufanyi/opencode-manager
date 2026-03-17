@@ -388,7 +388,6 @@ func (sc *StreamContext) sendSingleMessage(fullContent, rawContent string, semap
 		ChatID:      sc.chatID,
 		Text:        fullContent,
 		ParseMode:   models.ParseModeHTML,
-		ReplyMarkup: promptDoneKeyboard(sc.sessionID),
 	}
 	if sc.replyToMessageID != 0 {
 		params.ReplyParameters = &models.ReplyParameters{
@@ -466,7 +465,6 @@ func (sc *StreamContext) sendSplitResponse(fullContent, rawContent, header strin
 		ChatID:      sc.chatID,
 		Text:        contText,
 		ParseMode:   models.ParseModeHTML,
-		ReplyMarkup: promptDoneKeyboard(sc.sessionID),
 	}
 	msg2, err := sc.b.SendMessage(context.Background(), contParams)
 	<-semaphore
