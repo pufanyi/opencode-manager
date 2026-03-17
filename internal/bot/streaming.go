@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"github.com/pufanyi/opencode-manager/internal/gitops"
 	"github.com/pufanyi/opencode-manager/internal/provider"
 )
 
@@ -35,6 +36,7 @@ type StreamContext struct {
 	messageID    int
 	sessionID    string
 	instanceName string
+	workDir      string // instance working directory for git merge-back
 
 	// Draft mode (private chats)
 	useDraft bool
@@ -66,7 +68,7 @@ func NewStreamManager() *StreamManager {
 	}
 }
 
-func (sm *StreamManager) StartStream(b *bot.Bot, chatID int64, messageID int, sessionID, instanceName string, ch <-chan provider.StreamEvent) *StreamContext {
+func (sm *StreamManager) StartStream(b *bot.Bot, chatID int64, messageID int, sessionID, instanceName, workDir string, ch <-chan provider.StreamEvent) *StreamContext {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	useDraft := chatID > 0
@@ -81,6 +83,7 @@ func (sm *StreamManager) StartStream(b *bot.Bot, chatID int64, messageID int, se
 		messageID:    messageID,
 		sessionID:    sessionID,
 		instanceName: instanceName,
+		workDir:      workDir,
 		useDraft:     useDraft,
 		draftID:      draftID,
 		cancel:       cancel,
@@ -177,14 +180,52 @@ func (sc *StreamContext) flushLoop(ctx context.Context, semaphore chan struct{})
 		select {
 		case <-ctx.Done():
 			sc.flush(semaphore, true)
+			sc.mergeBack()
 			return
 		case <-ticker.C:
 			if sc.isDone() {
 				sc.flush(semaphore, true)
+				sc.mergeBack()
 				return
 			}
 			sc.flush(semaphore, false)
 		}
+	}
+}
+
+// mergeBack attempts to merge the worktree branch back to main after prompt completion.
+func (sc *StreamContext) mergeBack() {
+	if sc.workDir == "" {
+		return
+	}
+
+	result := gitops.MergeBack(sc.workDir)
+	if result == nil {
+		return
+	}
+
+	slog.Info("merge-back result", "instance", sc.instanceName, "merged", result.Merged, "message", result.Message)
+
+	if !result.Merged {
+		// Only notify if there was something noteworthy (not "no new commits" etc.)
+		if result.Branch != "" && result.Message != "no new commits to merge" && result.Message != "already on main branch" {
+			sc.sendMergeNotification(fmt.Sprintf("⚠️ %s", result.Message))
+		}
+		return
+	}
+
+	sc.sendMergeNotification(fmt.Sprintf("✅ %s", result.Message))
+}
+
+func (sc *StreamContext) sendMergeNotification(text string) {
+	msg := fmt.Sprintf("<b>[%s]</b> Git: %s", escapeHTML(sc.instanceName), escapeHTML(text))
+	_, err := sc.b.SendMessage(context.Background(), &bot.SendMessageParams{
+		ChatID:    sc.chatID,
+		Text:      msg,
+		ParseMode: models.ParseModeHTML,
+	})
+	if err != nil {
+		slog.Warn("failed to send merge notification", "error", err)
 	}
 }
 
