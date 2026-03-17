@@ -728,7 +728,9 @@ func (p *claudeParser) parseEvent(line []byte) *StreamEvent {
 			}
 			return &StreamEvent{Type: "error", Error: errMsg}
 		}
-		return &StreamEvent{Type: "done", Done: true}
+		// Don't emit "done" here — the Prompt() goroutine sends it after
+		// merge-back completes, ensuring merge_failed events arrive first.
+		return nil
 	}
 
 	return nil
