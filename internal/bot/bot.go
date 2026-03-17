@@ -19,7 +19,7 @@ type Bot struct {
 }
 
 func New(cfg *config.TelegramConfig, procMgr *process.Manager, st *store.Store) (*Bot, error) {
-	streamMgr := NewStreamManager()
+	streamMgr := NewStreamManager(cfg.BoardInterval)
 	handlers := NewHandlers(procMgr, st, streamMgr)
 
 	allowedUsers := make(map[int64]bool)

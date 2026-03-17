@@ -40,7 +40,7 @@ export class ApiService implements OnDestroy {
   readonly instances$ = new BehaviorSubject<Instance[]>([]);
 
   constructor() {
-    this.pollSub = timer(0, 5000)
+    this.pollSub = timer(0, 2000)
       .pipe(switchMap(() => this.http.get<Instance[]>(`${this.baseUrl}/instances`)))
       .subscribe({
         next: (instances) => this.instances$.next(instances),
