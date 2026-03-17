@@ -39,7 +39,7 @@ Commands:
 /start_inst &lt;name&gt; — Start a stopped instance
 /status — Current instance &amp; session info
 /session [new] — Show or create session
-/sessions — List sessions
+/sessions — List &amp; manage sessions
 /abort — Abort running prompt
 /help — Show this help
 
@@ -294,11 +294,16 @@ func (h *Handlers) HandleStatus(ctx context.Context, b *bot.Bot, update *models.
 
 	sessionInfo := "none"
 	if state.ActiveSessionID != "" {
-		sessionInfo = state.ActiveSessionID
+		cs, _ := h.store.GetClaudeSession(state.ActiveSessionID)
+		if cs != nil && cs.Title != "" {
+			sessionInfo = fmt.Sprintf("%s (%d msgs)", cs.Title, cs.MessageCount)
+		} else {
+			sessionInfo = state.ActiveSessionID[:min(12, len(state.ActiveSessionID))]
+		}
 	}
 
 	text := fmt.Sprintf("<b>Active Instance:</b> %s\n<b>Provider:</b> %s\n<b>Status:</b> %s\n<b>Directory:</b> <code>%s</code>\n<b>Session:</b> %s",
-		escapeHTML(inst.Name), provLabel, string(inst.Status()), escapeHTML(inst.Directory), sessionInfo)
+		escapeHTML(inst.Name), provLabel, string(inst.Status()), escapeHTML(inst.Directory), escapeHTML(sessionInfo))
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
@@ -347,36 +352,40 @@ func (h *Handlers) HandleSession(ctx context.Context, b *bot.Bot, update *models
 		return
 	}
 
-	session, err := inst.Provider.GetSession(ctx, state.ActiveSessionID)
-	if err != nil {
+	cs, err := h.store.GetClaudeSession(state.ActiveSessionID)
+	if err != nil || cs == nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
-			Text:   fmt.Sprintf("Failed to get session: %s", err),
+			Text:   fmt.Sprintf("Failed to get session: session not found"),
 		})
 		return
 	}
 
-	title := session.Title
+	title := cs.Title
 	if title == "" {
 		title = "(untitled)"
 	}
 
+	timeAgo := formatTimeAgo(cs.UpdatedAt)
+
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
-		Text:      fmt.Sprintf("<b>[%s]</b> Session: <code>%s</code>\nTitle: %s", escapeHTML(inst.Name), session.ID, title),
+		Text:      fmt.Sprintf("<b>[%s]</b> Session: <code>%s</code>\nTitle: %s\nMessages: %d\nLast active: %s", escapeHTML(inst.Name), cs.ID, escapeHTML(title), cs.MessageCount, timeAgo),
 		ParseMode: models.ParseModeHTML,
 	})
 }
 
 func (h *Handlers) HandleSessions(ctx context.Context, b *bot.Bot, update *models.Update) {
 	userID := update.Message.From.ID
+	state, _ := h.store.GetUserState(userID)
+
 	inst, err := h.getActiveInstance(userID)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: err.Error()})
 		return
 	}
 
-	sessions, err := inst.Provider.ListSessions(ctx)
+	dbSessions, err := h.store.ListClaudeSessions(inst.ID)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
@@ -385,23 +394,52 @@ func (h *Handlers) HandleSessions(ctx context.Context, b *bot.Bot, update *model
 		return
 	}
 
-	if len(sessions) == 0 {
+	if len(dbSessions) == 0 {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    update.Message.Chat.ID,
-			Text:      fmt.Sprintf("<b>[%s]</b> No sessions. Use <code>/session new</code> to create one.", escapeHTML(inst.Name)),
+			Text:      fmt.Sprintf("<b>[%s]</b> No sessions. Use <code>/session new</code> or send a message to create one.", escapeHTML(inst.Name)),
 			ParseMode: models.ParseModeHTML,
 		})
 		return
 	}
 
+	activeSessionID := ""
+	if state != nil {
+		activeSessionID = state.ActiveSessionID
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("<b>[%s]</b> Sessions:\n\n", escapeHTML(inst.Name)))
+	for i, s := range dbSessions {
+		if i >= 20 {
+			sb.WriteString(fmt.Sprintf("\n... and %d more", len(dbSessions)-20))
+			break
+		}
+		title := s.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		icon := "  "
+		if s.ID == activeSessionID {
+			icon = "▶ "
+		}
+		timeAgo := formatTimeAgo(s.UpdatedAt)
+		sb.WriteString(fmt.Sprintf("%s<b>%s</b>\n   %d msgs · %s\n", icon, escapeHTML(title), s.MessageCount, timeAgo))
+	}
+
 	var entries []sessionEntry
-	for _, s := range sessions {
-		entries = append(entries, sessionEntry{ID: s.ID, Title: s.Title})
+	for _, s := range dbSessions {
+		entries = append(entries, sessionEntry{
+			ID:           s.ID,
+			Title:        s.Title,
+			MessageCount: s.MessageCount,
+			IsActive:     s.ID == activeSessionID,
+		})
 	}
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      update.Message.Chat.ID,
-		Text:        fmt.Sprintf("<b>[%s]</b> Sessions:", escapeHTML(inst.Name)),
+		Text:        sb.String(),
 		ParseMode:   models.ParseModeHTML,
 		ReplyMarkup: sessionListKeyboard(entries),
 	})
@@ -462,7 +500,17 @@ func (h *Handlers) HandlePrompt(ctx context.Context, b *bot.Bot, update *models.
 		}
 		_ = h.store.SetActiveSession(userID, session.ID)
 		state.ActiveSessionID = session.ID
+
+		// Auto-title session from first prompt
+		title := text
+		if len(title) > 60 {
+			title = title[:60] + "..."
+		}
+		_ = h.store.UpdateClaudeSessionTitle(session.ID, title)
 	}
+
+	// Track session activity
+	_ = h.store.UpdateClaudeSessionActivity(state.ActiveSessionID)
 
 	// Send placeholder
 	placeholder, err := b.SendMessage(ctx, &bot.SendMessageParams{

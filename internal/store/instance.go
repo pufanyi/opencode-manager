@@ -113,15 +113,17 @@ func (s *Store) GetRunningInstances() ([]*Instance, error) {
 // Claude session methods
 
 type ClaudeSession struct {
-	ID         string
-	InstanceID string
-	Title      string
-	CreatedAt  time.Time
+	ID           string
+	InstanceID   string
+	Title        string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	MessageCount int
 }
 
 func (s *Store) CreateClaudeSession(instanceID, sessionID, title string) error {
 	_, err := s.db.Exec(
-		`INSERT INTO claude_sessions (id, instance_id, title) VALUES (?, ?, ?)`,
+		`INSERT INTO claude_sessions (id, instance_id, title, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)`,
 		sessionID, instanceID, title,
 	)
 	return err
@@ -130,8 +132,8 @@ func (s *Store) CreateClaudeSession(instanceID, sessionID, title string) error {
 func (s *Store) GetClaudeSession(sessionID string) (*ClaudeSession, error) {
 	cs := &ClaudeSession{}
 	err := s.db.QueryRow(
-		`SELECT id, instance_id, title, created_at FROM claude_sessions WHERE id = ?`, sessionID,
-	).Scan(&cs.ID, &cs.InstanceID, &cs.Title, &cs.CreatedAt)
+		`SELECT id, instance_id, title, created_at, COALESCE(updated_at, created_at), COALESCE(message_count, 0) FROM claude_sessions WHERE id = ?`, sessionID,
+	).Scan(&cs.ID, &cs.InstanceID, &cs.Title, &cs.CreatedAt, &cs.UpdatedAt, &cs.MessageCount)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -143,7 +145,8 @@ func (s *Store) GetClaudeSession(sessionID string) (*ClaudeSession, error) {
 
 func (s *Store) ListClaudeSessions(instanceID string) ([]ClaudeSession, error) {
 	rows, err := s.db.Query(
-		`SELECT id, instance_id, title, created_at FROM claude_sessions WHERE instance_id = ? ORDER BY created_at DESC`, instanceID,
+		`SELECT id, instance_id, title, created_at, COALESCE(updated_at, created_at), COALESCE(message_count, 0)
+		 FROM claude_sessions WHERE instance_id = ? ORDER BY COALESCE(updated_at, created_at) DESC`, instanceID,
 	)
 	if err != nil {
 		return nil, err
@@ -153,12 +156,33 @@ func (s *Store) ListClaudeSessions(instanceID string) ([]ClaudeSession, error) {
 	var sessions []ClaudeSession
 	for rows.Next() {
 		var cs ClaudeSession
-		if err := rows.Scan(&cs.ID, &cs.InstanceID, &cs.Title, &cs.CreatedAt); err != nil {
+		if err := rows.Scan(&cs.ID, &cs.InstanceID, &cs.Title, &cs.CreatedAt, &cs.UpdatedAt, &cs.MessageCount); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, cs)
 	}
 	return sessions, rows.Err()
+}
+
+func (s *Store) UpdateClaudeSessionTitle(sessionID, title string) error {
+	_, err := s.db.Exec(
+		`UPDATE claude_sessions SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		title, sessionID,
+	)
+	return err
+}
+
+func (s *Store) UpdateClaudeSessionActivity(sessionID string) error {
+	_, err := s.db.Exec(
+		`UPDATE claude_sessions SET message_count = message_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		sessionID,
+	)
+	return err
+}
+
+func (s *Store) DeleteClaudeSession(sessionID string) error {
+	_, err := s.db.Exec(`DELETE FROM claude_sessions WHERE id = ?`, sessionID)
+	return err
 }
 
 func (s *Store) scanInstance(row *sql.Row) (*Instance, error) {

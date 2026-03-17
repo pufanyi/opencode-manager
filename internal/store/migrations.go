@@ -41,6 +41,8 @@ func (s *Store) migrate() error {
 
 	// Safe ALTER TABLE for existing databases
 	safeAddColumn(s.db, "instances", "provider_type", "TEXT NOT NULL DEFAULT 'claudecode'")
+	safeAddColumn(s.db, "claude_sessions", "updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP")
+	safeAddColumn(s.db, "claude_sessions", "message_count", "INTEGER NOT NULL DEFAULT 0")
 
 	return nil
 }

@@ -49,27 +49,62 @@ func instanceActionsKeyboard(inst *process.Instance) *models.InlineKeyboardMarku
 
 func sessionListKeyboard(sessions []sessionEntry) *models.InlineKeyboardMarkup {
 	var rows [][]models.InlineKeyboardButton
-	for _, s := range sessions {
-		label := s.ID
-		if s.Title != "" {
-			label = s.Title
+
+	// Limit to 20 sessions for keyboard
+	limit := len(sessions)
+	if limit > 20 {
+		limit = 20
+	}
+
+	for _, s := range sessions[:limit] {
+		label := s.Title
+		if label == "" {
+			label = s.ID[:min(12, len(s.ID))]
 		}
-		if len(label) > 30 {
-			label = label[:30] + "..."
+		if len(label) > 28 {
+			label = label[:28] + "..."
 		}
-		rows = append(rows, []models.InlineKeyboardButton{
+
+		// Add active indicator and message count
+		prefix := ""
+		if s.IsActive {
+			prefix = "▶ "
+		}
+		suffix := ""
+		if s.MessageCount > 0 {
+			suffix = fmt.Sprintf(" [%d]", s.MessageCount)
+		}
+		label = prefix + label + suffix
+
+		row := []models.InlineKeyboardButton{
 			{
 				Text:         label,
 				CallbackData: fmt.Sprintf("session:%s", s.ID),
 			},
-		})
+			{
+				Text:         "🗑",
+				CallbackData: fmt.Sprintf("delsession:%s", s.ID),
+			},
+		}
+		rows = append(rows, row)
 	}
+
+	// Add "New Session" button at the bottom
+	rows = append(rows, []models.InlineKeyboardButton{
+		{
+			Text:         "+ New Session",
+			CallbackData: "newsession",
+		},
+	})
+
 	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 type sessionEntry struct {
-	ID    string
-	Title string
+	ID           string
+	Title        string
+	MessageCount int
+	IsActive     bool
 }
 
 func promptDoneKeyboard(sessionID string) *models.InlineKeyboardMarkup {

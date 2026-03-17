@@ -2,7 +2,9 @@ package bot
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/leonid-shevtsov/telegold"
 	"github.com/yuin/goldmark"
@@ -18,6 +20,27 @@ func escapeHTML(s string) string {
 		">", "&gt;",
 	)
 	return r.Replace(s)
+}
+
+// formatTimeAgo returns a human-readable relative time string.
+func formatTimeAgo(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		m := int(d.Minutes())
+		return fmt.Sprintf("%dm ago", m)
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		return fmt.Sprintf("%dh ago", h)
+	default:
+		days := int(d.Hours() / 24)
+		if days == 1 {
+			return "yesterday"
+		}
+		return fmt.Sprintf("%dd ago", days)
+	}
 }
 
 // markdownToTelegramHTML converts standard Markdown to Telegram-safe HTML.

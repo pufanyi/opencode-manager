@@ -46,6 +46,8 @@ func (h *Handlers) HandleCallback(ctx context.Context, b *bot.Bot, update *model
 		h.callbackAbort(ctx, b, chatID, userID, param)
 	case "newsession":
 		h.callbackNewSession(ctx, b, chatID, userID)
+	case "delsession":
+		h.callbackDeleteSession(ctx, b, chatID, userID, param)
 	default:
 		slog.Warn("unknown callback action", "action", action)
 	}
@@ -146,9 +148,14 @@ func (h *Handlers) callbackSession(ctx context.Context, b *bot.Bot, chatID int64
 		instName = inst.Name
 	}
 
+	label := sessionID
+	if cs, _ := h.store.GetClaudeSession(sessionID); cs != nil && cs.Title != "" {
+		label = fmt.Sprintf("%s (%d msgs)", cs.Title, cs.MessageCount)
+	}
+
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
-		Text:      fmt.Sprintf("<b>[%s]</b> Switched to session <code>%s</code>", escapeHTML(instName), sessionID),
+		Text:      fmt.Sprintf("<b>[%s]</b> Switched to session: %s", escapeHTML(instName), escapeHTML(label)),
 		ParseMode: models.ParseModeHTML,
 	})
 }
@@ -170,6 +177,31 @@ func (h *Handlers) callbackAbort(ctx context.Context, b *bot.Bot, chatID int64, 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
 		Text:      fmt.Sprintf("<b>[%s]</b> Aborted.", escapeHTML(inst.Name)),
+		ParseMode: models.ParseModeHTML,
+	})
+}
+
+func (h *Handlers) callbackDeleteSession(ctx context.Context, b *bot.Bot, chatID int64, userID int64, sessionID string) {
+	// If deleting the active session, clear it
+	state, _ := h.store.GetUserState(userID)
+	if state != nil && state.ActiveSessionID == sessionID {
+		_ = h.store.SetActiveSession(userID, "")
+	}
+
+	cs, _ := h.store.GetClaudeSession(sessionID)
+	label := sessionID
+	if cs != nil && cs.Title != "" {
+		label = cs.Title
+	}
+
+	if err := h.store.DeleteClaudeSession(sessionID); err != nil {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to delete session: %s", err)})
+		return
+	}
+
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:    chatID,
+		Text:      fmt.Sprintf("Session <b>%s</b> deleted.", escapeHTML(label)),
 		ParseMode: models.ParseModeHTML,
 	})
 }
