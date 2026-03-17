@@ -107,13 +107,3 @@ type sessionEntry struct {
 	IsActive     bool
 }
 
-func promptDoneKeyboard(sessionID string) *models.InlineKeyboardMarkup {
-	return &models.InlineKeyboardMarkup{
-		InlineKeyboard: [][]models.InlineKeyboardButton{
-			{
-				{Text: "Abort", CallbackData: fmt.Sprintf("abort:%s", sessionID)},
-				{Text: "New Session", CallbackData: "newsession"},
-			},
-		},
-	}
-}
