@@ -119,12 +119,14 @@ type ClaudeSession struct {
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 	MessageCount int
+	WorktreePath string
+	Branch       string
 }
 
-func (s *Store) CreateClaudeSession(instanceID, sessionID, title string) error {
+func (s *Store) CreateClaudeSession(instanceID, sessionID, title, worktreePath, branch string) error {
 	_, err := s.db.Exec(
-		`INSERT INTO claude_sessions (id, instance_id, title, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)`,
-		sessionID, instanceID, title,
+		`INSERT INTO claude_sessions (id, instance_id, title, worktree_path, branch, updated_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		sessionID, instanceID, title, worktreePath, branch,
 	)
 	return err
 }
@@ -133,8 +135,8 @@ func (s *Store) GetClaudeSession(sessionID string) (*ClaudeSession, error) {
 	cs := &ClaudeSession{}
 	var createdAt, updatedAt string
 	err := s.db.QueryRow(
-		`SELECT id, instance_id, COALESCE(title, ''), COALESCE(created_at, ''), COALESCE(updated_at, created_at, ''), COALESCE(message_count, 0) FROM claude_sessions WHERE id = ?`, sessionID,
-	).Scan(&cs.ID, &cs.InstanceID, &cs.Title, &createdAt, &updatedAt, &cs.MessageCount)
+		`SELECT id, instance_id, COALESCE(title, ''), COALESCE(created_at, ''), COALESCE(updated_at, created_at, ''), COALESCE(message_count, 0), COALESCE(worktree_path, ''), COALESCE(branch, '') FROM claude_sessions WHERE id = ?`, sessionID,
+	).Scan(&cs.ID, &cs.InstanceID, &cs.Title, &createdAt, &updatedAt, &cs.MessageCount, &cs.WorktreePath, &cs.Branch)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -148,7 +150,7 @@ func (s *Store) GetClaudeSession(sessionID string) (*ClaudeSession, error) {
 
 func (s *Store) ListClaudeSessions(instanceID string) ([]ClaudeSession, error) {
 	rows, err := s.db.Query(
-		`SELECT id, instance_id, COALESCE(title, ''), COALESCE(created_at, ''), COALESCE(updated_at, created_at, ''), COALESCE(message_count, 0)
+		`SELECT id, instance_id, COALESCE(title, ''), COALESCE(created_at, ''), COALESCE(updated_at, created_at, ''), COALESCE(message_count, 0), COALESCE(worktree_path, ''), COALESCE(branch, '')
 		 FROM claude_sessions WHERE instance_id = ? ORDER BY COALESCE(updated_at, created_at) DESC`, instanceID,
 	)
 	if err != nil {
@@ -160,7 +162,7 @@ func (s *Store) ListClaudeSessions(instanceID string) ([]ClaudeSession, error) {
 	for rows.Next() {
 		var cs ClaudeSession
 		var createdAt, updatedAt string
-		if err := rows.Scan(&cs.ID, &cs.InstanceID, &cs.Title, &createdAt, &updatedAt, &cs.MessageCount); err != nil {
+		if err := rows.Scan(&cs.ID, &cs.InstanceID, &cs.Title, &createdAt, &updatedAt, &cs.MessageCount, &cs.WorktreePath, &cs.Branch); err != nil {
 			return nil, err
 		}
 		cs.CreatedAt = parseTime(createdAt)

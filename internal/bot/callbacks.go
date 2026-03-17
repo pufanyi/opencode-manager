@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/go-telegram/bot"
@@ -48,6 +49,9 @@ func (h *Handlers) HandleCallback(ctx context.Context, b *bot.Bot, update *model
 		h.callbackNewSession(ctx, b, chatID, userID)
 	case "delsession":
 		h.callbackDeleteSession(ctx, b, chatID, userID, param)
+	case "stoptask":
+		taskID, _ := strconv.Atoi(param)
+		h.callbackStopTask(ctx, b, chatID, taskID)
 	default:
 		slog.Warn("unknown callback action", "action", action)
 	}
@@ -181,6 +185,20 @@ func (h *Handlers) callbackAbort(ctx context.Context, b *bot.Bot, chatID int64, 
 	})
 }
 
+func (h *Handlers) callbackStopTask(ctx context.Context, b *bot.Bot, chatID int64, taskID int) {
+	if !h.streamMgr.StopTask(taskID) {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   fmt.Sprintf("Task #%d not found or already completed.", taskID),
+		})
+		return
+	}
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   fmt.Sprintf("Task #%d stopped.", taskID),
+	})
+}
+
 func (h *Handlers) callbackDeleteSession(ctx context.Context, b *bot.Bot, chatID int64, userID int64, sessionID string) {
 	// If deleting the active session, clear it
 	state, _ := h.store.GetUserState(userID)
@@ -194,9 +212,27 @@ func (h *Handlers) callbackDeleteSession(ctx context.Context, b *bot.Bot, chatID
 		label = cs.Title
 	}
 
-	if err := h.store.DeleteClaudeSession(sessionID); err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to delete session: %s", err)})
-		return
+	// Use provider's DeleteSession if available (handles worktree cleanup)
+	inst, _ := h.getActiveInstance(userID)
+	if inst != nil {
+		if ccp, ok := inst.Provider.(interface {
+			DeleteSession(ctx context.Context, sessionID string) error
+		}); ok {
+			if err := ccp.DeleteSession(ctx, sessionID); err != nil {
+				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to delete session: %s", err)})
+				return
+			}
+		} else {
+			if err := h.store.DeleteClaudeSession(sessionID); err != nil {
+				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to delete session: %s", err)})
+				return
+			}
+		}
+	} else {
+		if err := h.store.DeleteClaudeSession(sessionID); err != nil {
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to delete session: %s", err)})
+			return
+		}
 	}
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{

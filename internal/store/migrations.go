@@ -33,6 +33,12 @@ func (s *Store) migrate() error {
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			message_count INTEGER NOT NULL DEFAULT 0
 		)`,
+		`CREATE TABLE IF NOT EXISTS message_sessions (
+			chat_id INTEGER NOT NULL,
+			message_id INTEGER NOT NULL,
+			session_id TEXT NOT NULL,
+			PRIMARY KEY (chat_id, message_id)
+		)`,
 	}
 
 	for i, m := range migrations {
@@ -45,6 +51,8 @@ func (s *Store) migrate() error {
 	safeAddColumn(s.db, "instances", "provider_type", "TEXT NOT NULL DEFAULT 'claudecode'")
 	safeAddColumn(s.db, "claude_sessions", "updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP")
 	safeAddColumn(s.db, "claude_sessions", "message_count", "INTEGER NOT NULL DEFAULT 0")
+	safeAddColumn(s.db, "claude_sessions", "worktree_path", "TEXT NOT NULL DEFAULT ''")
+	safeAddColumn(s.db, "claude_sessions", "branch", "TEXT NOT NULL DEFAULT ''")
 
 	return nil
 }

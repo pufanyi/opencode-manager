@@ -333,53 +333,47 @@ func toolIcon(state string) string {
 	}
 }
 
-// formatToolsHTML renders tool statuses as a compact HTML line.
-// Deduplicates by name, showing each tool once with its latest state.
+// formatToolsHTML renders tool statuses as a workflow HTML line.
+// Shows every invocation in order to reflect the actual workflow sequence.
 func formatToolsHTML(tools []toolStatus) string {
 	if len(tools) == 0 {
 		return ""
 	}
 
-	seen := make(map[string]int) // name → index in deduped
-	var deduped []toolStatus
-
-	for _, t := range tools {
-		if idx, exists := seen[t.Name]; exists {
-			deduped[idx] = t
-		} else {
-			seen[t.Name] = len(deduped)
-			deduped = append(deduped, t)
-		}
+	const maxVisible = 8
+	display := tools
+	var prefix string
+	if len(tools) > maxVisible {
+		skipped := len(tools) - maxVisible
+		prefix = fmt.Sprintf("<code>(%d more)</code> ", skipped)
+		display = tools[skipped:]
 	}
 
 	var parts []string
-	for _, t := range deduped {
+	for _, t := range display {
 		parts = append(parts, fmt.Sprintf("%s <code>%s</code>", toolIcon(t.State), escapeHTML(t.Name)))
 	}
-	return strings.Join(parts, " · ")
+	return prefix + strings.Join(parts, " → ")
 }
 
-// formatToolsPlain renders tool statuses as plain text (no HTML tags).
+// formatToolsPlain renders tool statuses as plain text workflow (no HTML tags).
 func formatToolsPlain(tools []toolStatus) string {
 	if len(tools) == 0 {
 		return ""
 	}
 
-	seen := make(map[string]int)
-	var deduped []toolStatus
-
-	for _, t := range tools {
-		if idx, exists := seen[t.Name]; exists {
-			deduped[idx] = t
-		} else {
-			seen[t.Name] = len(deduped)
-			deduped = append(deduped, t)
-		}
+	const maxVisible = 8
+	display := tools
+	var prefix string
+	if len(tools) > maxVisible {
+		skipped := len(tools) - maxVisible
+		prefix = fmt.Sprintf("(%d more) ", skipped)
+		display = tools[skipped:]
 	}
 
 	var parts []string
-	for _, t := range deduped {
+	for _, t := range display {
 		parts = append(parts, fmt.Sprintf("%s %s", toolIcon(t.State), t.Name))
 	}
-	return strings.Join(parts, " · ")
+	return prefix + strings.Join(parts, " → ")
 }

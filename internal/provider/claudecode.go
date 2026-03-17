@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -16,19 +18,26 @@ import (
 	"github.com/pufanyi/opencode-manager/internal/store"
 )
 
+// sessionCmd tracks one active claude process for a session.
+type sessionCmd struct {
+	cmd    *exec.Cmd
+	cancel context.CancelFunc
+}
+
 // ClaudeCodeProvider manages Claude Code CLI invocations.
-// Each prompt spawns a new `claude -p` process with stream-json output.
+// Supports concurrent prompts across different sessions via git worktrees.
 type ClaudeCodeProvider struct {
 	binary string
 	dir    string
 	store  *store.Store
 	instID string // instance ID for session tracking
 
-	mu            sync.Mutex
-	activeCmd     *exec.Cmd
-	activeCancel  context.CancelFunc
-	activeSession string
-	usedSessions  map[string]bool // sessions that have been prompted at least once
+	mu           sync.Mutex
+	activeCmds   map[string]*sessionCmd // sessionID → active command
+	usedSessions map[string]bool        // sessions that have been prompted at least once
+
+	// mergeMu serializes merge+sync operations to avoid conflicts.
+	mergeMu sync.Mutex
 }
 
 func NewClaudeCodeProvider(binary, dir string, st *store.Store, instanceID string) *ClaudeCodeProvider {
@@ -37,6 +46,7 @@ func NewClaudeCodeProvider(binary, dir string, st *store.Store, instanceID strin
 		dir:          dir,
 		store:        st,
 		instID:       instanceID,
+		activeCmds:   make(map[string]*sessionCmd),
 		usedSessions: make(map[string]bool),
 	}
 }
@@ -69,50 +79,171 @@ func (p *ClaudeCodeProvider) Stop() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.activeCancel != nil {
-		p.activeCancel()
-		p.activeCancel = nil
+	for sid, sc := range p.activeCmds {
+		sc.cancel()
+		delete(p.activeCmds, sid)
 	}
 	return nil
 }
 
 func (p *ClaudeCodeProvider) WaitReady(ctx context.Context, timeout time.Duration) error {
-	// Claude Code has no persistent server — just validate binary exists.
 	if _, err := exec.LookPath(p.binary); err != nil {
 		return fmt.Errorf("claude binary not found: %w", err)
 	}
 	return nil
 }
 
-func (p *ClaudeCodeProvider) Wait() error {
-	// No persistent process to wait on.
-	return nil
-}
+func (p *ClaudeCodeProvider) Wait() error { return nil }
 
-func (p *ClaudeCodeProvider) Stderr() string {
-	// No persistent process stderr.
-	return ""
-}
+func (p *ClaudeCodeProvider) Stderr() string { return "" }
 
-func (p *ClaudeCodeProvider) SetPort(port int) {
-	// No-op: Claude Code doesn't use a port.
-}
+func (p *ClaudeCodeProvider) SetPort(port int) {}
 
-func (p *ClaudeCodeProvider) IsReady() bool {
-	return true // Always ready if binary exists
-}
+func (p *ClaudeCodeProvider) IsReady() bool { return true }
 
 func (p *ClaudeCodeProvider) HealthCheck(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, p.binary, "--version")
 	return cmd.Run()
 }
 
+// isGitRepo checks whether the instance directory is a git repository.
+func (p *ClaudeCodeProvider) isGitRepo() bool {
+	cmd := exec.Command("git", "-C", p.dir, "rev-parse", "--is-inside-work-tree")
+	return cmd.Run() == nil
+}
+
+// currentBranch returns the current branch name in the main repo.
+func (p *ClaudeCodeProvider) currentBranch() string {
+	out, err := exec.Command("git", "-C", p.dir, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return "main"
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// createWorktree creates a git worktree for a session and returns (worktreePath, branchName, error).
+func (p *ClaudeCodeProvider) createWorktree(sessionID string) (string, string, error) {
+	branch := fmt.Sprintf("session/%s", sessionID[:12])
+	wtPath := filepath.Join(os.TempDir(), "opencode-manager", p.instID, "worktrees", sessionID[:12])
+
+	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
+		return "", "", fmt.Errorf("mkdir for worktree: %w", err)
+	}
+
+	// Create worktree with a new branch based on current HEAD
+	cmd := exec.Command("git", "-C", p.dir, "worktree", "add", "-b", branch, wtPath, "HEAD")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", "", fmt.Errorf("git worktree add: %s: %w", stderr.String(), err)
+	}
+
+	slog.Info("created git worktree", "session", sessionID[:12], "path", wtPath, "branch", branch)
+	return wtPath, branch, nil
+}
+
+// removeWorktree cleans up a git worktree.
+func (p *ClaudeCodeProvider) removeWorktree(wtPath string) error {
+	// First try git worktree remove
+	cmd := exec.Command("git", "-C", p.dir, "worktree", "remove", "--force", wtPath)
+	if err := cmd.Run(); err != nil {
+		slog.Warn("git worktree remove failed, cleaning up manually", "path", wtPath, "error", err)
+		os.RemoveAll(wtPath)
+	}
+
+	// Prune stale worktrees
+	exec.Command("git", "-C", p.dir, "worktree", "prune").Run()
+	return nil
+}
+
+// mergeAndSync merges a worktree branch back to the base branch and syncs other worktrees.
+func (p *ClaudeCodeProvider) mergeAndSync(sessionID, wtPath, branch string) error {
+	p.mergeMu.Lock()
+	defer p.mergeMu.Unlock()
+
+	baseBranch := p.currentBranch()
+
+	// Check if the session branch has any new commits vs the base
+	diffCmd := exec.Command("git", "-C", wtPath, "diff", "--quiet", baseBranch+".."+branch)
+	if diffCmd.Run() == nil {
+		slog.Info("no changes to merge", "session", sessionID[:12], "branch", branch)
+		return nil
+	}
+
+	// Merge session branch into base branch in the main repo
+	mergeCmd := exec.Command("git", "-C", p.dir, "merge", "--no-ff", "-m",
+		fmt.Sprintf("Merge session/%s", sessionID[:12]), branch)
+	var mergeStderr bytes.Buffer
+	mergeCmd.Stderr = &mergeStderr
+	if err := mergeCmd.Run(); err != nil {
+		// Abort the failed merge
+		exec.Command("git", "-C", p.dir, "merge", "--abort").Run()
+		return fmt.Errorf("merge failed (branch %s): %s: %w", branch, mergeStderr.String(), err)
+	}
+
+	slog.Info("merged session branch", "session", sessionID[:12], "branch", branch, "into", baseBranch)
+
+	// Sync all other active worktrees by rebasing them onto updated base
+	p.syncWorktrees(sessionID, baseBranch)
+
+	// Delete the merged branch
+	exec.Command("git", "-C", p.dir, "branch", "-d", branch).Run()
+
+	return nil
+}
+
+// syncWorktrees rebases all active worktrees (except the one that just merged) onto the base branch.
+func (p *ClaudeCodeProvider) syncWorktrees(excludeSessionID, baseBranch string) {
+	sessions, err := p.store.ListClaudeSessions(p.instID)
+	if err != nil {
+		slog.Warn("failed to list sessions for sync", "error", err)
+		return
+	}
+
+	for _, s := range sessions {
+		if s.ID == excludeSessionID || s.WorktreePath == "" {
+			continue
+		}
+		// Check the worktree still exists
+		if _, err := os.Stat(s.WorktreePath); os.IsNotExist(err) {
+			continue
+		}
+
+		// Rebase the session branch onto the updated base
+		rebaseCmd := exec.Command("git", "-C", s.WorktreePath, "rebase", baseBranch)
+		var stderr bytes.Buffer
+		rebaseCmd.Stderr = &stderr
+		if err := rebaseCmd.Run(); err != nil {
+			slog.Warn("rebase failed for worktree, aborting rebase",
+				"session", s.ID[:12], "error", stderr.String())
+			exec.Command("git", "-C", s.WorktreePath, "rebase", "--abort").Run()
+		} else {
+			slog.Info("synced worktree", "session", s.ID[:12])
+		}
+	}
+}
+
 func (p *ClaudeCodeProvider) CreateSession(ctx context.Context) (*Session, error) {
 	id := uuid.New().String()
-	if err := p.store.CreateClaudeSession(p.instID, id, ""); err != nil {
+
+	var wtPath, branch string
+	if p.isGitRepo() {
+		var err error
+		wtPath, branch, err = p.createWorktree(id)
+		if err != nil {
+			slog.Warn("failed to create worktree, session will use main dir", "error", err)
+			// Fall back to running in the main directory (no concurrency isolation)
+		}
+	}
+
+	if err := p.store.CreateClaudeSession(p.instID, id, "", wtPath, branch); err != nil {
+		// Clean up worktree if session DB insert fails
+		if wtPath != "" {
+			p.removeWorktree(wtPath)
+		}
 		return nil, err
 	}
-	return &Session{ID: id}, nil
+	return &Session{ID: id, Title: ""}, nil
 }
 
 func (p *ClaudeCodeProvider) GetSession(ctx context.Context, sessionID string) (*Session, error) {
@@ -140,19 +271,25 @@ func (p *ClaudeCodeProvider) ListSessions(ctx context.Context) ([]Session, error
 
 func (p *ClaudeCodeProvider) Prompt(ctx context.Context, sessionID string, content string) (<-chan StreamEvent, error) {
 	p.mu.Lock()
-	// Kill any existing prompt
-	if p.activeCancel != nil {
-		p.activeCancel()
+	// Kill any existing prompt for THIS session only (not other sessions)
+	if old, ok := p.activeCmds[sessionID]; ok {
+		old.cancel()
+		delete(p.activeCmds, sessionID)
 	}
 
 	cmdCtx, cancel := context.WithCancel(ctx)
-	p.activeCancel = cancel
-	p.activeSession = sessionID
 	isResume := p.usedSessions[sessionID]
 	p.mu.Unlock()
 
-	// First prompt for a session uses --session-id (creates new session).
-	// Subsequent prompts use --resume (continues existing session).
+	// Determine working directory: use worktree if available
+	workDir := p.dir
+	cs, err := p.store.GetClaudeSession(sessionID)
+	if err == nil && cs != nil && cs.WorktreePath != "" {
+		if _, statErr := os.Stat(cs.WorktreePath); statErr == nil {
+			workDir = cs.WorktreePath
+		}
+	}
+
 	args := []string{
 		"-p", content,
 		"--output-format", "stream-json",
@@ -167,13 +304,13 @@ func (p *ClaudeCodeProvider) Prompt(ctx context.Context, sessionID string, conte
 	}
 
 	cmd := exec.CommandContext(cmdCtx, p.binary, args...)
-	cmd.Dir = p.dir
+	cmd.Dir = workDir
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
 
 	p.mu.Lock()
-	p.activeCmd = cmd
+	p.activeCmds[sessionID] = &sessionCmd{cmd: cmd, cancel: cancel}
 	p.mu.Unlock()
 
 	stdout, err := cmd.StdoutPipe()
@@ -187,13 +324,11 @@ func (p *ClaudeCodeProvider) Prompt(ctx context.Context, sessionID string, conte
 		return nil, fmt.Errorf("starting claude: %w", err)
 	}
 
-	// Mark session as used only after process starts successfully,
-	// so a failed start doesn't cause the next attempt to use --resume.
 	p.mu.Lock()
 	p.usedSessions[sessionID] = true
 	p.mu.Unlock()
 
-	slog.Info("claude prompt started", "session", sessionID, "pid", cmd.Process.Pid)
+	slog.Info("claude prompt started", "session", sessionID, "pid", cmd.Process.Pid, "dir", workDir)
 
 	ch := make(chan StreamEvent, 64)
 
@@ -223,22 +358,32 @@ func (p *ClaudeCodeProvider) Prompt(ctx context.Context, sessionID string, conte
 		}
 
 		// Wait for process to exit
-		err := cmd.Wait()
+		waitErr := cmd.Wait()
 
 		p.mu.Lock()
-		p.activeCmd = nil
-		p.activeCancel = nil
+		delete(p.activeCmds, sessionID)
 		p.mu.Unlock()
 
-		if err != nil && cmdCtx.Err() == nil {
-			errMsg := err.Error()
+		if waitErr != nil && cmdCtx.Err() == nil {
+			errMsg := waitErr.Error()
 			if stderr := stderrBuf.String(); stderr != "" {
 				errMsg = stderr
-				slog.Error("claude process failed", "error", err, "stderr", stderr)
+				slog.Error("claude process failed", "error", waitErr, "stderr", stderr)
 			}
 			select {
 			case ch <- StreamEvent{Type: "error", Error: errMsg}:
 			default:
+			}
+		}
+
+		// Auto-merge if this is a worktree session and prompt succeeded
+		if waitErr == nil && cs != nil && cs.WorktreePath != "" && cs.Branch != "" {
+			if mergeErr := p.mergeAndSync(sessionID, cs.WorktreePath, cs.Branch); mergeErr != nil {
+				slog.Error("auto-merge failed", "session", sessionID, "error", mergeErr)
+				select {
+				case ch <- StreamEvent{Type: "error", Error: fmt.Sprintf("Auto-merge failed: %s", mergeErr)}:
+				default:
+				}
 			}
 		}
 
@@ -256,43 +401,53 @@ func (p *ClaudeCodeProvider) Abort(ctx context.Context, sessionID string) error 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.activeCancel != nil && p.activeSession == sessionID {
-		p.activeCancel()
-		p.activeCancel = nil
-		if p.activeCmd != nil && p.activeCmd.Process != nil {
-			_ = p.activeCmd.Process.Kill()
+	if sc, ok := p.activeCmds[sessionID]; ok {
+		sc.cancel()
+		if sc.cmd != nil && sc.cmd.Process != nil {
+			_ = sc.cmd.Process.Kill()
 		}
+		delete(p.activeCmds, sessionID)
 	}
 	return nil
 }
 
-// Claude Code stream-json event types (with --include-partial-messages).
-// One JSON object per line:
-//
-// {"type":"system","subtype":"init",...}
-// {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}}
-// {"type":"assistant","message":{"content":[{"type":"text","text":"full text"}]},...}
-// {"type":"tool_use","tool":{"name":"..."},...}
-// {"type":"tool_result","tool":{"name":"..."},...}
-// {"type":"result","subtype":"success","result":"full text",...}
+// DeleteSession removes the worktree and branch for a session.
+func (p *ClaudeCodeProvider) DeleteSession(ctx context.Context, sessionID string) error {
+	cs, err := p.store.GetClaudeSession(sessionID)
+	if err != nil {
+		return err
+	}
+	if cs == nil {
+		return nil
+	}
 
+	// Abort any running prompt
+	_ = p.Abort(ctx, sessionID)
+
+	// Remove worktree
+	if cs.WorktreePath != "" {
+		p.removeWorktree(cs.WorktreePath)
+	}
+
+	// Delete the branch
+	if cs.Branch != "" {
+		exec.Command("git", "-C", p.dir, "branch", "-D", cs.Branch).Run()
+	}
+
+	return p.store.DeleteClaudeSession(sessionID)
+}
+
+// Claude Code stream-json event types (with --include-partial-messages).
 type claudeEvent struct {
 	Type    string `json:"type"`
 	Subtype string `json:"subtype,omitempty"`
 
-	// For "stream_event"
-	Event *claudeStreamEvent `json:"event,omitempty"`
-
-	// For "assistant" events (full message snapshot)
-	Message *claudeMessage `json:"message,omitempty"`
-
-	// For "result" events
-	Result  string `json:"result,omitempty"`
-	IsError bool   `json:"is_error,omitempty"`
-	Error   string `json:"error,omitempty"`
-
-	// For "tool_use" / "tool_result" events
-	Tool *claudeTool `json:"tool,omitempty"`
+	Event   *claudeStreamEvent `json:"event,omitempty"`
+	Message *claudeMessage     `json:"message,omitempty"`
+	Result  string             `json:"result,omitempty"`
+	IsError bool               `json:"is_error,omitempty"`
+	Error   string             `json:"error,omitempty"`
+	Tool    *claudeTool        `json:"tool,omitempty"`
 }
 
 type claudeStreamEvent struct {
@@ -320,9 +475,6 @@ type claudeTool struct {
 	Name string `json:"name,omitempty"`
 }
 
-// textAccumulator tracks the full text for streaming display.
-// Claude sends deltas; we accumulate and emit the full text each time
-// so the streaming bridge can display progressively.
 type textAccumulator struct {
 	buf strings.Builder
 }
@@ -360,7 +512,6 @@ func parseClaudeEvent(line []byte, acc *textAccumulator) *StreamEvent {
 		}
 
 	case "assistant":
-		// Full message snapshot — use as final text, reset accumulator
 		if evt.Message != nil {
 			var text string
 			for _, block := range evt.Message.Content {

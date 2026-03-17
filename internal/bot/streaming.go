@@ -8,18 +8,17 @@ import (
 	"strings"
 	"sync"
 	"time"
-
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/pufanyi/opencode-manager/internal/gitops"
 	"github.com/pufanyi/opencode-manager/internal/provider"
+	"github.com/pufanyi/opencode-manager/internal/store"
 )
 
 const (
 	maxMessageLen   = 4096
 	fileFallbackLen = 12000
-	editInterval    = 5 * time.Second
-	draftInterval   = 2 * time.Second
+	boardInterval   = 5 * time.Second
 )
 
 // toolStatus tracks a single tool invocation's display state.
@@ -28,19 +27,29 @@ type toolStatus struct {
 	State string // "running", "completed", "error"
 }
 
+// boardEntry holds snapshot data for one stream in the status board.
+type boardEntry struct {
+	taskID       int
+	instanceName string
+	sessionTitle string
+	currentTool  string
+	elapsed      time.Duration
+}
+
 // StreamContext manages streaming provider events to a Telegram message.
 type StreamContext struct {
-	mu           sync.Mutex
-	b            *bot.Bot
-	chatID       int64
-	messageID    int
-	sessionID    string
-	instanceName string
-	workDir      string // instance working directory for git merge-back
-
-	// Draft mode (private chats)
-	useDraft bool
-	draftID  string
+	mu               sync.Mutex
+	b                *bot.Bot
+	store            *store.Store
+	chatID           int64
+	sessionID        string
+	instanceName     string
+	sessionTitle     string
+	workDir          string // instance working directory for git merge-back
+	replyToMessageID int    // original user message ID for Telegram reply
+	startedAt        time.Time
+	manager          *StreamManager
+	taskID           int
 
 	// Content tracked separately: text + tools
 	textContent string
@@ -48,9 +57,9 @@ type StreamContext struct {
 
 	dirty        bool
 	done         bool
-	messages     []int // IDs of continuation messages
 	cancel       context.CancelFunc
-	lastEdit     time.Time
+	promptCancel context.CancelFunc
+	abortFunc    func()
 	cleanupFiles []string // temp files to remove when stream ends
 }
 
@@ -58,47 +67,72 @@ type StreamContext struct {
 type StreamManager struct {
 	mu        sync.Mutex
 	streams   map[string]*StreamContext // keyed by sessionID
+	taskMap   map[int]*StreamContext    // keyed by taskID
 	semaphore chan struct{}
+	nextID    int
+
+	// Status board
+	b            *bot.Bot
+	boardMu      sync.Mutex
+	boardMsgs    map[int64]int    // chatID -> board message ID
+	boardContent map[int64]string // chatID -> last sent content
+	boardStarted bool
 }
 
 func NewStreamManager() *StreamManager {
 	return &StreamManager{
-		streams:   make(map[string]*StreamContext),
-		semaphore: make(chan struct{}, 25),
+		streams:      make(map[string]*StreamContext),
+		taskMap:      make(map[int]*StreamContext),
+		semaphore:    make(chan struct{}, 25),
+		boardMsgs:    make(map[int64]int),
+		boardContent: make(map[int64]string),
 	}
 }
 
-func (sm *StreamManager) StartStream(b *bot.Bot, chatID int64, messageID int, sessionID, instanceName, workDir string, ch <-chan provider.StreamEvent) *StreamContext {
+func (sm *StreamManager) StartStream(b *bot.Bot, st *store.Store, chatID int64, sessionID, instanceName, sessionTitle, workDir string, replyToMessageID int, ch <-chan provider.StreamEvent, promptCancel context.CancelFunc, abortFunc func()) *StreamContext {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	useDraft := chatID > 0
-	draftID := ""
-	if useDraft {
-		draftID = fmt.Sprintf("%d", time.Now().UnixNano())
+	sm.mu.Lock()
+	sm.nextID++
+	taskID := sm.nextID
+
+	if old, ok := sm.streams[sessionID]; ok {
+		old.cancel()
+		delete(sm.taskMap, old.taskID)
 	}
 
 	sc := &StreamContext{
-		b:            b,
-		chatID:       chatID,
-		messageID:    messageID,
-		sessionID:    sessionID,
-		instanceName: instanceName,
-		workDir:      workDir,
-		useDraft:     useDraft,
-		draftID:      draftID,
-		cancel:       cancel,
-		lastEdit:     time.Now(),
+		b:                b,
+		store:            st,
+		chatID:           chatID,
+		sessionID:        sessionID,
+		instanceName:     instanceName,
+		sessionTitle:     sessionTitle,
+		workDir:          workDir,
+		replyToMessageID: replyToMessageID,
+		startedAt:        time.Now(),
+		manager:          sm,
+		taskID:           taskID,
+		cancel:           cancel,
+		promptCancel:     promptCancel,
+		abortFunc:        abortFunc,
 	}
 
-	sm.mu.Lock()
-	if old, ok := sm.streams[sessionID]; ok {
-		old.cancel()
-	}
 	sm.streams[sessionID] = sc
+	sm.taskMap[taskID] = sc
+
+	if !sm.boardStarted {
+		sm.b = b
+		sm.boardStarted = true
+		go sm.boardLoop()
+	}
 	sm.mu.Unlock()
 
 	go sc.consumeStream(ctx, ch)
 	go sc.flushLoop(ctx, sm.semaphore)
+
+	// Immediate board update to show new task
+	go sm.refreshBoard()
 
 	return sc
 }
@@ -110,13 +144,55 @@ func (sc *StreamContext) AddCleanupFile(path string) {
 	sc.mu.Unlock()
 }
 
+// RemoveStream cancels and removes a stream by sessionID (used by /abort).
 func (sm *StreamManager) RemoveStream(sessionID string) {
 	sm.mu.Lock()
 	if sc, ok := sm.streams[sessionID]; ok {
 		sc.cancel()
+		if sc.promptCancel != nil {
+			sc.promptCancel()
+		}
+		delete(sm.taskMap, sc.taskID)
 		delete(sm.streams, sessionID)
 	}
 	sm.mu.Unlock()
+	go sm.refreshBoard()
+}
+
+// StopTask cancels and removes a stream by taskID (used by board stop buttons).
+func (sm *StreamManager) StopTask(taskID int) bool {
+	sm.mu.Lock()
+	sc, ok := sm.taskMap[taskID]
+	if !ok {
+		sm.mu.Unlock()
+		return false
+	}
+	sc.cancel()
+	promptCancel := sc.promptCancel
+	abortFn := sc.abortFunc
+	delete(sm.streams, sc.sessionID)
+	delete(sm.taskMap, taskID)
+	sm.mu.Unlock()
+
+	if promptCancel != nil {
+		promptCancel()
+	}
+	if abortFn != nil {
+		abortFn()
+	}
+	go sm.refreshBoard()
+	return true
+}
+
+// onStreamDone is called by flushLoop when a stream finishes naturally.
+func (sm *StreamManager) onStreamDone(sessionID string) {
+	sm.mu.Lock()
+	if sc, ok := sm.streams[sessionID]; ok {
+		delete(sm.taskMap, sc.taskID)
+	}
+	delete(sm.streams, sessionID)
+	sm.mu.Unlock()
+	go sm.refreshBoard()
 }
 
 // consumeStream reads from the provider's event channel and accumulates content.
@@ -167,28 +243,22 @@ func (sc *StreamContext) updateTool(name, state string) {
 }
 
 func (sc *StreamContext) flushLoop(ctx context.Context, semaphore chan struct{}) {
-	interval := editInterval
-	if sc.useDraft {
-		interval = draftInterval
-	}
-
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	defer sc.cleanup()
+	defer sc.manager.onStreamDone(sc.sessionID)
 
 	for {
 		select {
 		case <-ctx.Done():
-			sc.flush(semaphore, true)
-			sc.mergeBack()
+			// Aborted — don't send partial response
 			return
 		case <-ticker.C:
 			if sc.isDone() {
-				sc.flush(semaphore, true)
+				sc.sendResponse(semaphore)
 				sc.mergeBack()
 				return
 			}
-			sc.flush(semaphore, false)
 		}
 	}
 }
@@ -251,22 +321,13 @@ func (sc *StreamContext) isDone() bool {
 	return sc.done
 }
 
-func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
+// sendResponse builds the final message content and sends it as a reply.
+func (sc *StreamContext) sendResponse(semaphore chan struct{}) {
 	sc.mu.Lock()
-	if !sc.dirty {
-		sc.mu.Unlock()
-		return
-	}
-	sc.dirty = false
 	text := sc.textContent
 	tools := make([]toolStatus, len(sc.tools))
 	copy(tools, sc.tools)
-	done := sc.done
 	sc.mu.Unlock()
-
-	if text == "" && len(tools) == 0 {
-		return
-	}
 
 	// --- Build HTML content ---
 	header := fmt.Sprintf("<b>[%s]</b>", escapeHTML(sc.instanceName))
@@ -280,13 +341,15 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 		}
 	}
 
-	// Assemble: header + tools (top) + text
 	fullContent := header
 	if toolsHTML != "" {
 		fullContent += "\n" + toolsHTML
 	}
 	if renderedText != "" {
 		fullContent += "\n\n" + renderedText
+	}
+	if toolsHTML == "" && renderedText == "" {
+		fullContent += " Done."
 	}
 
 	// --- Build plain-text fallback ---
@@ -299,204 +362,119 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 		rawParts = append(rawParts, text)
 	}
 	rawContent := strings.Join(rawParts, "\n\n")
+	if rawContent == "" {
+		rawContent = "Done."
+	}
 
-	// --- Dispatch ---
+	// --- Dispatch based on size ---
 	if len(fullContent) > fileFallbackLen {
 		sc.sendAsFile(rawContent)
-		if sc.useDraft {
-			sc.finalizeDraft("")
-		}
 		return
 	}
-
-	if sc.useDraft {
-		sc.flushDraft(fullContent, rawContent, done || final, semaphore)
-	} else {
-		sc.flushEdit(fullContent, rawContent, header, done || final, semaphore)
+	if len(fullContent) > maxMessageLen {
+		sc.sendSplitResponse(fullContent, rawContent, header, semaphore)
+		return
 	}
+	sc.sendSingleMessage(fullContent, rawContent, semaphore)
 }
 
-// flushDraft sends updates via sendMessageDraft, finalizes with sendMessage when done.
-func (sc *StreamContext) flushDraft(fullContent, rawContent string, final bool, semaphore chan struct{}) {
-	if len(fullContent) > maxMessageLen {
-		fullContent = truncateHTML(fullContent, maxMessageLen-10) + "\n..."
-	}
-
+// sendSingleMessage sends the final response as a single Telegram message.
+func (sc *StreamContext) sendSingleMessage(fullContent, rawContent string, semaphore chan struct{}) {
 	semaphore <- struct{}{}
 	defer func() { <-semaphore }()
 
-	if !final {
-		display := fullContent + " ▌"
-		if len(display) > maxMessageLen {
-			display = fullContent
-		}
-
-		_, err := sc.b.SendMessageDraft(context.Background(), &bot.SendMessageDraftParams{
-			ChatID:    sc.chatID,
-			DraftID:   sc.draftID,
-			Text:      display,
-			ParseMode: models.ParseModeHTML,
-		})
-		if err != nil {
-			slog.Warn("draft failed, falling back to edit", "error", err)
-			sc.useDraft = false
-			sc.doEdit(fullContent, rawContent, false)
-		}
-		return
-	}
-
-	sc.finalizeDraft(fullContent)
-}
-
-// finalizeDraft converts the draft into a permanent message.
-func (sc *StreamContext) finalizeDraft(fullContent string) {
 	params := &bot.SendMessageParams{
-		ChatID:    sc.chatID,
-		ParseMode: models.ParseModeHTML,
+		ChatID:      sc.chatID,
+		Text:        fullContent,
+		ParseMode:   models.ParseModeHTML,
+		ReplyMarkup: promptDoneKeyboard(sc.sessionID),
 	}
-
-	if fullContent != "" {
-		params.Text = fullContent
-	} else {
-		params.Text = fmt.Sprintf("<b>[%s]</b> Done.", escapeHTML(sc.instanceName))
+	if sc.replyToMessageID != 0 {
+		params.ReplyParameters = &models.ReplyParameters{
+			MessageID:                sc.replyToMessageID,
+			AllowSendingWithoutReply: true,
+		}
 	}
-	params.ReplyMarkup = promptDoneKeyboard(sc.sessionID)
 
 	msg, err := sc.b.SendMessage(context.Background(), params)
 	if err != nil {
-		slog.Warn("finalize draft with HTML failed, retrying plain text", "error", err)
+		slog.Warn("send response with HTML failed, retrying plain text", "error", err)
 		params.ParseMode = ""
-		params.Text = fmt.Sprintf("[%s]\n\n%s", sc.instanceName, stripHTML(fullContent))
+		params.Text = fmt.Sprintf("[%s]\n\n%s", sc.instanceName, rawContent)
 		if len(params.Text) > maxMessageLen {
 			params.Text = truncateUTF8(params.Text, maxMessageLen-10) + "\n..."
 		}
 		msg, err = sc.b.SendMessage(context.Background(), params)
 		if err != nil {
-			slog.Error("finalize draft failed completely", "error", err)
+			slog.Error("send response failed completely", "error", err)
 			return
 		}
 	}
 
-	// Delete the placeholder message
-	_, _ = sc.b.DeleteMessage(context.Background(), &bot.DeleteMessageParams{
-		ChatID:    sc.chatID,
-		MessageID: sc.messageID,
-	})
-
-	sc.mu.Lock()
-	sc.messages = append(sc.messages, msg.ID)
-	sc.mu.Unlock()
-}
-
-// flushEdit is the fallback for group chats — uses editMessageText.
-func (sc *StreamContext) flushEdit(fullContent, rawContent, header string, final bool, semaphore chan struct{}) {
-	if len(fullContent) > maxMessageLen {
-		sc.handleLongMessage(header, fullContent, rawContent, semaphore)
-		return
-	}
-
-	semaphore <- struct{}{}
-	defer func() { <-semaphore }()
-
-	sc.doEdit(fullContent, rawContent, final)
-}
-
-// doEdit performs the actual editMessageText, with plain-text fallback on HTML error.
-func (sc *StreamContext) doEdit(fullContent, rawContent string, final bool) {
-	sc.mu.Lock()
-	msgID := sc.messageID
-	if len(sc.messages) > 0 {
-		msgID = sc.messages[len(sc.messages)-1]
-	}
-	sc.mu.Unlock()
-
-	params := &bot.EditMessageTextParams{
-		ChatID:    sc.chatID,
-		MessageID: msgID,
-		Text:      fullContent,
-		ParseMode: models.ParseModeHTML,
-	}
-
-	if final {
-		params.ReplyMarkup = promptDoneKeyboard(sc.sessionID)
-	}
-
-	_, err := sc.b.EditMessageText(context.Background(), params)
-	if err != nil {
-		errStr := err.Error()
-		if strings.Contains(errStr, "message is not modified") {
-			return
-		}
-
-		slog.Warn("edit message failed with HTML, retrying plain text", "error", err, "msgID", msgID)
-
-		plainHeader := fmt.Sprintf("[%s]\n\n", sc.instanceName)
-		plainContent := plainHeader + rawContent
-		if len(plainContent) > maxMessageLen {
-			plainContent = truncateUTF8(plainContent, maxMessageLen-10) + "\n..."
-		}
-		params.ParseMode = ""
-		params.Text = plainContent
-		_, err = sc.b.EditMessageText(context.Background(), params)
-		if err != nil && !strings.Contains(err.Error(), "message is not modified") {
-			slog.Error("edit message failed completely", "error", err, "msgID", msgID)
-		}
+	if sc.store != nil && msg != nil {
+		_ = sc.store.SetMessageSession(sc.chatID, msg.ID, sc.sessionID)
 	}
 }
 
-func (sc *StreamContext) handleLongMessage(header, fullContent, rawContent string, semaphore chan struct{}) {
+// sendSplitResponse sends a long response as two messages.
+func (sc *StreamContext) sendSplitResponse(fullContent, rawContent, header string, semaphore chan struct{}) {
 	available := maxMessageLen - len(header) - 20
 	body := fullContent[len(header):]
 	if len(body) > available {
 		body = truncateHTML(body, available)
 	}
-	truncated := header + body + "\n..."
+	first := header + body + "\n..."
 
+	// First chunk
 	semaphore <- struct{}{}
-
-	sc.mu.Lock()
-	msgID := sc.messageID
-	if len(sc.messages) > 0 {
-		msgID = sc.messages[len(sc.messages)-1]
-	}
-	sc.mu.Unlock()
-
-	_, err := sc.b.EditMessageText(context.Background(), &bot.EditMessageTextParams{
+	firstParams := &bot.SendMessageParams{
 		ChatID:    sc.chatID,
-		MessageID: msgID,
-		Text:      truncated,
+		Text:      first,
 		ParseMode: models.ParseModeHTML,
-	})
-	if err != nil && !strings.Contains(err.Error(), "message is not modified") {
-		slog.Warn("edit long message failed", "error", err)
+	}
+	if sc.replyToMessageID != 0 {
+		firstParams.ReplyParameters = &models.ReplyParameters{
+			MessageID:                sc.replyToMessageID,
+			AllowSendingWithoutReply: true,
+		}
+	}
+	msg, err := sc.b.SendMessage(context.Background(), firstParams)
+	<-semaphore
+	if err != nil {
+		slog.Warn("send first chunk failed, sending as file", "error", err)
+		sc.sendAsFile(rawContent)
+		return
+	}
+	if sc.store != nil {
+		_ = sc.store.SetMessageSession(sc.chatID, msg.ID, sc.sessionID)
 	}
 
-	<-semaphore
-
+	// Continuation
 	remaining := fullContent[len(header)+len(body):]
 	if remaining == "" {
 		return
 	}
-	if len(remaining) > maxMessageLen-len(header)-20 {
-		remaining = truncateHTML(remaining, maxMessageLen-len(header)-20) + "\n..."
+	contText := header + "\n" + remaining
+	if len(contText) > maxMessageLen {
+		contText = truncateHTML(contText, maxMessageLen-20) + "\n..."
 	}
 
 	semaphore <- struct{}{}
-	msg, err := sc.b.SendMessage(context.Background(), &bot.SendMessageParams{
-		ChatID:    sc.chatID,
-		Text:      header + remaining,
-		ParseMode: models.ParseModeHTML,
-	})
+	contParams := &bot.SendMessageParams{
+		ChatID:      sc.chatID,
+		Text:        contText,
+		ParseMode:   models.ParseModeHTML,
+		ReplyMarkup: promptDoneKeyboard(sc.sessionID),
+	}
+	msg2, err := sc.b.SendMessage(context.Background(), contParams)
 	<-semaphore
-
 	if err != nil {
-		slog.Warn("send continuation message failed", "error", err)
+		slog.Warn("send continuation failed", "error", err)
 		return
 	}
-
-	sc.mu.Lock()
-	sc.messages = append(sc.messages, msg.ID)
-	sc.mu.Unlock()
+	if sc.store != nil {
+		_ = sc.store.SetMessageSession(sc.chatID, msg2.ID, sc.sessionID)
+	}
 }
 
 func (sc *StreamContext) sendAsFile(content string) {
@@ -505,12 +483,19 @@ func (sc *StreamContext) sendAsFile(content string) {
 		Data:     strings.NewReader(content),
 	}
 
-	_, err := sc.b.SendDocument(context.Background(), &bot.SendDocumentParams{
+	docParams := &bot.SendDocumentParams{
 		ChatID:    sc.chatID,
 		Document:  fileData,
 		Caption:   fmt.Sprintf("<b>[%s]</b> Response too long, sent as file.", escapeHTML(sc.instanceName)),
 		ParseMode: models.ParseModeHTML,
-	})
+	}
+	if sc.replyToMessageID != 0 {
+		docParams.ReplyParameters = &models.ReplyParameters{
+			MessageID:                sc.replyToMessageID,
+			AllowSendingWithoutReply: true,
+		}
+	}
+	_, err := sc.b.SendDocument(context.Background(), docParams)
 	if err != nil {
 		slog.Error("failed to send file", "error", err)
 	}
@@ -528,4 +513,183 @@ func stripHTML(s string) string {
 		"&gt;", ">",
 	)
 	return r.Replace(s)
+}
+
+// ---------------------------------------------------------------------------
+// Status Board — consolidated <pre> table of all active streams per chat
+// ---------------------------------------------------------------------------
+
+func (sm *StreamManager) boardLoop() {
+	ticker := time.NewTicker(boardInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		sm.refreshBoard()
+	}
+}
+
+func (sm *StreamManager) refreshBoard() {
+	sm.boardMu.Lock()
+	defer sm.boardMu.Unlock()
+
+	sm.mu.Lock()
+	b := sm.b
+	if b == nil {
+		sm.mu.Unlock()
+		return
+	}
+
+	// Collect active stream info grouped by chatID
+	chatEntries := make(map[int64][]boardEntry)
+	for _, sc := range sm.streams {
+		sc.mu.Lock()
+		if !sc.done {
+			var tool string
+			for j := len(sc.tools) - 1; j >= 0; j-- {
+				if sc.tools[j].State == "running" {
+					tool = sc.tools[j].Name
+					break
+				}
+			}
+			chatEntries[sc.chatID] = append(chatEntries[sc.chatID], boardEntry{
+				taskID:       sc.taskID,
+				instanceName: sc.instanceName,
+				sessionTitle: sc.sessionTitle,
+				currentTool:  tool,
+				elapsed:      time.Since(sc.startedAt),
+			})
+		}
+		sc.mu.Unlock()
+	}
+	sm.mu.Unlock()
+
+	// Update board for each chat with active streams
+	for chatID, entries := range chatEntries {
+		content := buildBoardHTML(entries)
+		keyboard := boardKeyboard(entries)
+
+		if sm.boardContent[chatID] == content {
+			continue
+		}
+
+		msgID := sm.boardMsgs[chatID]
+		if msgID == 0 {
+			sm.semaphore <- struct{}{}
+			msg, err := b.SendMessage(context.Background(), &bot.SendMessageParams{
+				ChatID:              chatID,
+				Text:                content,
+				ParseMode:           models.ParseModeHTML,
+				DisableNotification: true,
+				ReplyMarkup:         keyboard,
+			})
+			<-sm.semaphore
+			if err != nil {
+				slog.Warn("failed to send board message", "error", err)
+				continue
+			}
+			sm.boardMsgs[chatID] = msg.ID
+		} else {
+			sm.semaphore <- struct{}{}
+			_, err := b.EditMessageText(context.Background(), &bot.EditMessageTextParams{
+				ChatID:      chatID,
+				MessageID:   msgID,
+				Text:        content,
+				ParseMode:   models.ParseModeHTML,
+				ReplyMarkup: keyboard,
+			})
+			<-sm.semaphore
+			if err != nil && !strings.Contains(err.Error(), "message is not modified") {
+				slog.Warn("board edit failed, recreating", "error", err)
+				sm.semaphore <- struct{}{}
+				msg, err := b.SendMessage(context.Background(), &bot.SendMessageParams{
+					ChatID:              chatID,
+					Text:                content,
+					ParseMode:           models.ParseModeHTML,
+					DisableNotification: true,
+					ReplyMarkup:         keyboard,
+				})
+				<-sm.semaphore
+				if err == nil {
+					sm.boardMsgs[chatID] = msg.ID
+				}
+			}
+		}
+		sm.boardContent[chatID] = content
+	}
+
+	// Clean up boards for chats with no active streams
+	for chatID, msgID := range sm.boardMsgs {
+		if _, has := chatEntries[chatID]; !has && msgID != 0 {
+			sm.semaphore <- struct{}{}
+			_, _ = b.DeleteMessage(context.Background(), &bot.DeleteMessageParams{
+				ChatID:    chatID,
+				MessageID: msgID,
+			})
+			<-sm.semaphore
+			delete(sm.boardMsgs, chatID)
+			delete(sm.boardContent, chatID)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Board rendering — Unicode box-drawing table
+// ---------------------------------------------------------------------------
+
+func buildBoardHTML(entries []boardEntry) string {
+	var sb strings.Builder
+	sb.WriteString("📋 <b>Active Tasks</b>\n")
+
+	for _, e := range entries {
+		title := strings.ToValidUTF8(e.sessionTitle, "\uFFFD")
+		if title == "" {
+			title = "(new)"
+		}
+		runes := []rune(title)
+		if len(runes) > 30 {
+			title = string(runes[:30]) + ".."
+		}
+
+		inst := strings.ToValidUTF8(e.instanceName, "\uFFFD")
+
+		status := "thinking"
+		if e.currentTool != "" {
+			status = strings.ToValidUTF8(e.currentTool, "\uFFFD")
+		}
+
+		sb.WriteString(fmt.Sprintf("\n<b>#%d</b> %s\n", e.taskID, escapeHTML(inst)))
+		sb.WriteString(fmt.Sprintf("  %s | ⏳ %s (%s)\n", escapeHTML(title), escapeHTML(status), formatElapsed(e.elapsed)))
+	}
+
+	return sb.String()
+}
+
+// boardKeyboard builds inline stop buttons for each active task.
+func boardKeyboard(entries []boardEntry) *models.InlineKeyboardMarkup {
+	if len(entries) == 0 {
+		return nil
+	}
+	var row []models.InlineKeyboardButton
+	var rows [][]models.InlineKeyboardButton
+	for _, e := range entries {
+		row = append(row, models.InlineKeyboardButton{
+			Text:         fmt.Sprintf("Stop #%d", e.taskID),
+			CallbackData: fmt.Sprintf("stoptask:%d", e.taskID),
+		})
+		if len(row) >= 4 {
+			rows = append(rows, row)
+			row = nil
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+func formatElapsed(d time.Duration) string {
+	s := int(d.Seconds())
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	return fmt.Sprintf("%dm%ds", s/60, s%60)
 }

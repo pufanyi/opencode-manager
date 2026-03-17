@@ -375,9 +375,14 @@ func (h *Handlers) HandleSession(ctx context.Context, b *bot.Bot, update *models
 
 	timeAgo := formatTimeAgo(cs.UpdatedAt)
 
+	branchInfo := ""
+	if cs.Branch != "" {
+		branchInfo = fmt.Sprintf("\nBranch: <code>%s</code>", escapeHTML(cs.Branch))
+	}
+
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
-		Text:      fmt.Sprintf("<b>[%s]</b> Session: <code>%s</code>\nTitle: %s\nMessages: %d\nLast active: %s", escapeHTML(inst.Name), cs.ID, escapeHTML(title), cs.MessageCount, timeAgo),
+		Text:      fmt.Sprintf("<b>[%s]</b> Session: <code>%s</code>\nTitle: %s\nMessages: %d\nLast active: %s%s", escapeHTML(inst.Name), cs.ID, escapeHTML(title), cs.MessageCount, timeAgo, branchInfo),
 		ParseMode: models.ParseModeHTML,
 	})
 }
@@ -485,103 +490,64 @@ func (h *Handlers) HandleAbort(ctx context.Context, b *bot.Bot, update *models.U
 
 func (h *Handlers) HandlePrompt(ctx context.Context, b *bot.Bot, update *models.Update) {
 	userID := update.Message.From.ID
+	chatID := update.Message.Chat.ID
 	text := update.Message.Text
 
 	inst, err := h.getActiveInstance(userID)
 	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: err.Error()})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: err.Error()})
 		return
 	}
 
-	state, _ := h.store.GetUserState(userID)
-
-	// Auto-create session if none exists
-	if state.ActiveSessionID == "" {
-		session, err := inst.Provider.CreateSession(ctx)
-		if err != nil {
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID: update.Message.Chat.ID,
-				Text:   fmt.Sprintf("Failed to create session: %s", err),
-			})
-			return
-		}
-		_ = h.store.SetActiveSession(userID, session.ID)
-		state.ActiveSessionID = session.ID
-
-		// Auto-title session from first prompt
-		title := text
-		if len(title) > 60 {
-			title = title[:60] + "..."
-		}
-		_ = h.store.UpdateClaudeSessionTitle(session.ID, title)
+	// Resolve session: reply to bot message → continue that session; otherwise → new session
+	sessionID, sessionTitle := h.resolveSession(ctx, inst, userID, chatID, update.Message.ReplyToMessage, text)
+	if sessionID == "" {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to create session."})
+		return
 	}
 
 	// Track session activity
-	_ = h.store.UpdateClaudeSessionActivity(state.ActiveSessionID)
-
-	// Send placeholder
-	placeholder, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: update.Message.Chat.ID,
-		Text:   fmt.Sprintf("[%s] Thinking...", inst.Name),
-	})
-	if err != nil {
-		slog.Error("failed to send placeholder", "error", err)
-		return
-	}
+	_ = h.store.UpdateClaudeSessionActivity(sessionID)
+	_ = h.store.SetMessageSession(chatID, update.Message.ID, sessionID)
 
 	// Start prompt via provider
 	promptCtx, promptCancel := context.WithCancel(context.Background())
-	ch, err := inst.Provider.Prompt(promptCtx, state.ActiveSessionID, text)
+	ch, err := inst.Provider.Prompt(promptCtx, sessionID, text)
 	if err != nil {
 		promptCancel()
-		_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
-			ChatID:    update.Message.Chat.ID,
-			MessageID: placeholder.ID,
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
 			Text:      fmt.Sprintf("<b>[%s]</b> Failed to send prompt: %s", escapeHTML(inst.Name), err),
 			ParseMode: models.ParseModeHTML,
 		})
 		return
 	}
 
-	// Wire up streaming
-	sc := h.streamMgr.StartStream(b, update.Message.Chat.ID, placeholder.ID, state.ActiveSessionID, inst.Name, inst.Directory, ch)
-	_ = sc
-	_ = promptCancel // cancel is held by the stream context
+	// Wire up streaming (no placeholder — status board handles progress display)
+	abortFunc := func() { _ = inst.Provider.Abort(context.Background(), sessionID) }
+	h.streamMgr.StartStream(b, h.store, chatID, sessionID, inst.Name, sessionTitle, inst.Directory, update.Message.ID, ch, promptCancel, abortFunc)
 }
 
 func (h *Handlers) HandlePhoto(ctx context.Context, b *bot.Bot, update *models.Update) {
 	userID := update.Message.From.ID
+	chatID := update.Message.Chat.ID
 	caption := update.Message.Caption
 
 	inst, err := h.getActiveInstance(userID)
 	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: err.Error()})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: err.Error()})
 		return
 	}
 
-	state, _ := h.store.GetUserState(userID)
-
-	// Auto-create session if none exists
-	if state.ActiveSessionID == "" {
-		session, err := inst.Provider.CreateSession(ctx)
-		if err != nil {
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID: update.Message.Chat.ID,
-				Text:   fmt.Sprintf("Failed to create session: %s", err),
-			})
-			return
-		}
-		_ = h.store.SetActiveSession(userID, session.ID)
-		state.ActiveSessionID = session.ID
-
-		title := caption
-		if title == "" {
-			title = "(image)"
-		}
-		if len(title) > 60 {
-			title = title[:60] + "..."
-		}
-		_ = h.store.UpdateClaudeSessionTitle(session.ID, title)
+	// Resolve session via reply
+	titleHint := caption
+	if titleHint == "" {
+		titleHint = "(image)"
+	}
+	sessionID, sessionTitle := h.resolveSession(ctx, inst, userID, chatID, update.Message.ReplyToMessage, titleHint)
+	if sessionID == "" {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to create session."})
+		return
 	}
 
 	// Pick the largest photo (last in the array)
@@ -592,7 +558,7 @@ func (h *Handlers) HandlePhoto(ctx context.Context, b *bot.Bot, update *models.U
 	localPath, err := h.downloadTelegramFile(ctx, b, photo.FileID, inst.ID)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
+			ChatID: chatID,
 			Text:   fmt.Sprintf("Failed to download image: %s", err),
 		})
 		return
@@ -606,35 +572,25 @@ func (h *Handlers) HandlePhoto(ctx context.Context, b *bot.Bot, update *models.U
 		prompt = fmt.Sprintf("Please analyze this image.\n\nImage file: %s", localPath)
 	}
 
-	_ = h.store.UpdateClaudeSessionActivity(state.ActiveSessionID)
-
-	placeholder, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: update.Message.Chat.ID,
-		Text:   fmt.Sprintf("[%s] Thinking...", inst.Name),
-	})
-	if err != nil {
-		slog.Error("failed to send placeholder", "error", err)
-		return
-	}
+	_ = h.store.UpdateClaudeSessionActivity(sessionID)
+	_ = h.store.SetMessageSession(chatID, update.Message.ID, sessionID)
 
 	promptCtx, promptCancel := context.WithCancel(context.Background())
-	ch, err := inst.Provider.Prompt(promptCtx, state.ActiveSessionID, prompt)
+	ch, err := inst.Provider.Prompt(promptCtx, sessionID, prompt)
 	if err != nil {
 		promptCancel()
-		_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
-			ChatID:    update.Message.Chat.ID,
-			MessageID: placeholder.ID,
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
 			Text:      fmt.Sprintf("<b>[%s]</b> Failed to send prompt: %s", escapeHTML(inst.Name), err),
 			ParseMode: models.ParseModeHTML,
 		})
-		// Clean up image on failure
 		os.Remove(localPath)
 		return
 	}
 
-	sc := h.streamMgr.StartStream(b, update.Message.Chat.ID, placeholder.ID, state.ActiveSessionID, inst.Name, inst.Directory, ch)
+	abortFunc := func() { _ = inst.Provider.Abort(context.Background(), sessionID) }
+	sc := h.streamMgr.StartStream(b, h.store, chatID, sessionID, inst.Name, sessionTitle, inst.Directory, update.Message.ID, ch, promptCancel, abortFunc)
 	sc.AddCleanupFile(localPath)
-	_ = promptCancel
 }
 
 // downloadTelegramFile downloads a Telegram file to /tmp/opencode-manager/{instanceID}/images/.
@@ -688,6 +644,40 @@ func (h *Handlers) downloadTelegramFile(ctx context.Context, b *bot.Bot, fileID,
 
 	slog.Info("downloaded telegram photo", "path", localPath, "size", file.FileSize)
 	return localPath, nil
+}
+
+// resolveSession determines the session ID for a prompt.
+// If the user is replying to a bot message, it continues that session.
+// Otherwise, it creates a new session.
+func (h *Handlers) resolveSession(ctx context.Context, inst *process.Instance, userID, chatID int64, replyTo *models.Message, titleHint string) (string, string) {
+	// Try to resolve from reply
+	if replyTo != nil {
+		sessionID, _ := h.store.GetSessionByMessage(chatID, replyTo.ID)
+		if sessionID != "" {
+			_ = h.store.SetActiveSession(userID, sessionID)
+			title := ""
+			if cs, _ := h.store.GetClaudeSession(sessionID); cs != nil {
+				title = cs.Title
+			}
+			return sessionID, title
+		}
+	}
+
+	// No reply or reply target not found → create new session
+	session, err := inst.Provider.CreateSession(ctx)
+	if err != nil {
+		slog.Error("failed to create session", "error", err)
+		return "", ""
+	}
+	_ = h.store.SetActiveSession(userID, session.ID)
+
+	title := titleHint
+	if len(title) > 60 {
+		title = truncateUTF8(title, 60) + "..."
+	}
+	_ = h.store.UpdateClaudeSessionTitle(session.ID, title)
+
+	return session.ID, title
 }
 
 // getActiveInstance returns the active instance for a user.
