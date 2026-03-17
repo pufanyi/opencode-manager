@@ -3,16 +3,16 @@ package bot
 import (
 	"context"
 	"fmt"
-	"log/slog"
-	"os"
-	"strings"
-	"sync"
-	"time"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/pufanyi/opencode-manager/internal/gitops"
 	"github.com/pufanyi/opencode-manager/internal/provider"
 	"github.com/pufanyi/opencode-manager/internal/store"
+	"log/slog"
+	"os"
+	"strings"
+	"sync"
+	"time"
 )
 
 const (
@@ -489,20 +489,6 @@ func (sc *StreamContext) sendAsFile(content string) {
 	if err != nil {
 		slog.Error("failed to send file", "error", err)
 	}
-}
-
-// stripHTML is a simple helper to remove HTML tags for plain-text fallback.
-func stripHTML(s string) string {
-	r := strings.NewReplacer(
-		"<b>", "", "</b>", "",
-		"<i>", "", "</i>", "",
-		"<code>", "", "</code>", "",
-		"<pre>", "", "</pre>", "",
-		"&amp;", "&",
-		"&lt;", "<",
-		"&gt;", ">",
-	)
-	return r.Replace(s)
 }
 
 // ---------------------------------------------------------------------------
