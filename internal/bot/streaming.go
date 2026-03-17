@@ -36,6 +36,7 @@ type boardEntry struct {
 	location     string       // e.g. "🌿 worktree" or "📂 main dir"
 	tools        []toolStatus // recent tools for display (completed + running)
 	elapsed      time.Duration
+	hiddenTools  int // number of completed tools not shown
 }
 
 // StreamContext manages streaming provider events to a Telegram message.
@@ -610,16 +611,21 @@ func (sm *StreamManager) refreshBoard() {
 					completed = append(completed, t)
 				}
 			}
-			// Keep last 2 completed + all running, max 6 total
-			const maxCompleted = 2
+			// Keep last 3 completed + all running, max 8 total
+			const maxCompleted = 3
+			const maxDisplay = 8
+			hidden := 0
 			if len(completed) > maxCompleted {
+				hidden = len(completed) - maxCompleted
 				completed = completed[len(completed)-maxCompleted:]
 			}
 			display := make([]toolStatus, 0, len(completed)+len(running))
 			display = append(display, completed...)
 			display = append(display, running...)
-			if len(display) > 6 {
-				display = display[len(display)-6:]
+			if len(display) > maxDisplay {
+				overflow := len(display) - maxDisplay
+				hidden += overflow
+				display = display[overflow:]
 			}
 			if len(display) == 0 {
 				display = []toolStatus{{State: "running", Detail: "Thinking..."}}
@@ -632,6 +638,7 @@ func (sm *StreamManager) refreshBoard() {
 				location:     sc.location,
 				tools:        display,
 				elapsed:      time.Since(sc.startedAt),
+				hiddenTools:  hidden,
 			})
 		}
 		sc.mu.Unlock()
@@ -739,60 +746,77 @@ func (sm *StreamManager) refreshBoard() {
 
 func buildBoardHTML(entries []boardEntry) string {
 	var sb strings.Builder
-	sb.WriteString("📋 <b>Active Tasks</b>\n")
 
-	for i, e := range entries {
+	// Bold header with task count
+	taskWord := "task"
+	if len(entries) != 1 {
+		taskWord = "tasks"
+	}
+	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	sb.WriteString(fmt.Sprintf("⚡ <b>ACTIVE TASKS</b>  ─  %d %s\n", len(entries), taskWord))
+	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+	for _, e := range entries {
 		title := strings.ToValidUTF8(e.sessionTitle, "\uFFFD")
 		if title == "" {
 			title = "(new)"
 		}
 		runes := []rune(title)
-		if len(runes) > 30 {
-			title = string(runes[:30]) + ".."
+		if len(runes) > 35 {
+			title = string(runes[:35]) + "…"
 		}
 
 		inst := strings.ToValidUTF8(e.instanceName, "\uFFFD")
 
-		// Visual separator between tasks
-		if i > 0 {
-			sb.WriteString("┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n")
-		}
+		// Each task as a blockquote card
+		sb.WriteString("\n<blockquote>")
 
-		// Header: task ID, instance, elapsed — all on one bold line
-		sb.WriteString(fmt.Sprintf("\n<b>#%d  %s</b>  (%s)\n", e.taskID, escapeHTML(inst), formatElapsed(e.elapsed)))
+		// Task header: ID, instance name, elapsed time
+		sb.WriteString(fmt.Sprintf("<b>#%d  %s</b>  ·  ⏱ %s\n", e.taskID, escapeHTML(inst), formatElapsed(e.elapsed)))
+
 		// Location + session title
 		if e.location != "" {
-			sb.WriteString(fmt.Sprintf("<i>  %s · %s</i>\n", e.location, escapeHTML(title)))
+			sb.WriteString(fmt.Sprintf("%s  <i>%s</i>\n", e.location, escapeHTML(title)))
 		} else {
-			sb.WriteString(fmt.Sprintf("<i>  %s</i>\n", escapeHTML(title)))
+			sb.WriteString(fmt.Sprintf("<i>%s</i>\n", escapeHTML(title)))
 		}
 
-		for j, t := range e.tools {
-			prefix := "├"
-			if j == len(e.tools)-1 {
-				prefix = "└"
-			}
+		// Inner separator
+		sb.WriteString("─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─\n")
 
+		// Hidden tools indicator
+		if e.hiddenTools > 0 {
+			sb.WriteString(fmt.Sprintf("<i>↑ %d earlier tool", e.hiddenTools))
+			if e.hiddenTools != 1 {
+				sb.WriteString("s")
+			}
+			sb.WriteString("</i>\n")
+		}
+
+		// Tool list
+		for _, t := range e.tools {
 			// "Thinking" state — no tool name
 			if t.Name == "" {
-				sb.WriteString(fmt.Sprintf("  %s 💭 <i>%s</i>\n", prefix, escapeHTML(t.Detail)))
+				sb.WriteString(fmt.Sprintf("💭 <i>%s</i>\n", escapeHTML(t.Detail)))
 				continue
 			}
 
 			icon := toolStateIcon(t.State)
 			detail := strings.ToValidUTF8(t.Detail, "\uFFFD")
 			detailRunes := []rune(detail)
-			if len(detailRunes) > 50 {
-				detail = string(detailRunes[:50]) + ".."
+			if len(detailRunes) > 45 {
+				detail = string(detailRunes[:45]) + "…"
 			}
 
 			name := escapeHTML(t.Name)
 			if detail != "" {
-				sb.WriteString(fmt.Sprintf("  %s %s <b>%s</b>  <code>%s</code>\n", prefix, icon, name, escapeHTML(detail)))
+				sb.WriteString(fmt.Sprintf("%s <b>%s</b>  <code>%s</code>\n", icon, name, escapeHTML(detail)))
 			} else {
-				sb.WriteString(fmt.Sprintf("  %s %s <b>%s</b>\n", prefix, icon, name))
+				sb.WriteString(fmt.Sprintf("%s <b>%s</b>\n", icon, name))
 			}
 		}
+
+		sb.WriteString("</blockquote>")
 	}
 
 	return sb.String()
@@ -817,11 +841,22 @@ func boardKeyboard(entries []boardEntry) *models.InlineKeyboardMarkup {
 	if len(entries) == 0 {
 		return nil
 	}
+	// Show instance name in buttons when few tasks, otherwise use task ID
+	useNames := len(entries) <= 3
 	var row []models.InlineKeyboardButton
 	var rows [][]models.InlineKeyboardButton
 	for _, e := range entries {
+		label := fmt.Sprintf("🛑 #%d", e.taskID)
+		if useNames {
+			name := e.instanceName
+			nameRunes := []rune(name)
+			if len(nameRunes) > 12 {
+				name = string(nameRunes[:12]) + ".."
+			}
+			label = fmt.Sprintf("🛑 %s", name)
+		}
 		row = append(row, models.InlineKeyboardButton{
-			Text:         fmt.Sprintf("Stop #%d", e.taskID),
+			Text:         label,
 			CallbackData: fmt.Sprintf("stoptask:%d", e.taskID),
 		})
 		if len(row) >= 4 {
@@ -840,5 +875,10 @@ func formatElapsed(d time.Duration) string {
 	if s < 60 {
 		return fmt.Sprintf("%ds", s)
 	}
-	return fmt.Sprintf("%dm%ds", s/60, s%60)
+	m := s / 60
+	if m < 60 {
+		return fmt.Sprintf("%dm%02ds", m, s%60)
+	}
+	h := m / 60
+	return fmt.Sprintf("%dh%02dm", h, m%60)
 }
