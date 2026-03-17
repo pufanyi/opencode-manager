@@ -58,6 +58,10 @@ type StreamContext struct {
 	textContent string
 	tools       []toolStatus
 
+	// Merge failure info (from provider's merge_failed event)
+	mergeError  string
+	mergeBranch string
+
 	dirty        bool
 	done         bool
 	cancel       context.CancelFunc
@@ -250,6 +254,10 @@ func (sc *StreamContext) consumeStream(ctx context.Context, ch <-chan provider.S
 				sc.textContent = fmt.Sprintf("Error: %s", evt.Error)
 				sc.done = true
 				sc.dirty = true
+			case "merge_failed":
+				sc.mergeError = evt.Error
+				sc.mergeBranch = evt.MergeBranch
+				sc.dirty = true
 			}
 			sc.mu.Unlock()
 		}
@@ -284,7 +292,11 @@ func (sc *StreamContext) flushLoop(ctx context.Context, semaphore chan struct{})
 		case <-ticker.C:
 			if sc.isDone() {
 				sc.sendResponse(semaphore)
-				sc.mergeBack()
+				if sc.hasMergeError() {
+					sc.sendMergeFailureNotification()
+				} else {
+					sc.mergeBack()
+				}
 				return
 			}
 		}
@@ -324,6 +336,51 @@ func (sc *StreamContext) sendMergeNotification(text string) {
 	})
 	if err != nil {
 		slog.Warn("failed to send merge notification", "error", err)
+	}
+	sc.manager.NotifyNewMessage(sc.chatID)
+}
+
+// hasMergeError returns true if the provider reported a merge failure.
+func (sc *StreamContext) hasMergeError() bool {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return sc.mergeError != ""
+}
+
+// sendMergeFailureNotification sends a Telegram message about the merge failure
+// with an inline button that lets the user ask Claude Code to fix it.
+func (sc *StreamContext) sendMergeFailureNotification() {
+	sc.mu.Lock()
+	errMsg := sc.mergeError
+	branch := sc.mergeBranch
+	sc.mu.Unlock()
+
+	// Truncate long error messages
+	if len(errMsg) > 300 {
+		errMsg = errMsg[:300] + "..."
+	}
+
+	text := fmt.Sprintf(
+		"<b>[%s]</b> ⚠️ Auto-merge failed for branch <code>%s</code>:\n%s",
+		escapeHTML(sc.instanceName), escapeHTML(branch), escapeHTML(errMsg),
+	)
+
+	keyboard := &models.InlineKeyboardMarkup{
+		InlineKeyboard: [][]models.InlineKeyboardButton{
+			{
+				{Text: "🔧 Fix with Claude", CallbackData: fmt.Sprintf("mergefix:%s", sc.sessionID)},
+			},
+		},
+	}
+
+	_, err := sc.b.SendMessage(context.Background(), &bot.SendMessageParams{
+		ChatID:      sc.chatID,
+		Text:        text,
+		ParseMode:   models.ParseModeHTML,
+		ReplyMarkup: keyboard,
+	})
+	if err != nil {
+		slog.Warn("failed to send merge failure notification", "error", err)
 	}
 	sc.manager.NotifyNewMessage(sc.chatID)
 }

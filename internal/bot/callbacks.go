@@ -55,6 +55,8 @@ func (h *Handlers) HandleCallback(ctx context.Context, b *bot.Bot, update *model
 	case "stoptask":
 		taskID, _ := strconv.Atoi(param)
 		h.callbackStopTask(ctx, b, chatID, taskID)
+	case "mergefix":
+		h.callbackMergeFix(ctx, b, chatID, userID, param)
 	default:
 		slog.Warn("unknown callback action", "action", action)
 	}
@@ -200,6 +202,52 @@ func (h *Handlers) callbackStopTask(ctx context.Context, b *bot.Bot, chatID int6
 		ChatID: chatID,
 		Text:   fmt.Sprintf("Task #%d stopped.", taskID),
 	})
+}
+
+func (h *Handlers) callbackMergeFix(ctx context.Context, b *bot.Bot, chatID int64, userID int64, sessionID string) {
+	cs, err := h.store.GetClaudeSession(sessionID)
+	if err != nil || cs == nil {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Session not found."})
+		return
+	}
+	if cs.Branch == "" {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "No branch info for this session."})
+		return
+	}
+
+	inst := h.procMgr.GetInstance(cs.InstanceID)
+	if inst == nil {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Instance not found."})
+		return
+	}
+	if inst.Status() != process.StatusRunning {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   fmt.Sprintf("Instance '%s' is not running. Use /start_inst %s", inst.Name, inst.Name),
+		})
+		return
+	}
+
+	// Create a new session in the main directory (no worktree) to fix the merge
+	newSession, err := inst.Provider.CreateSession(ctx, nil)
+	if err != nil {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to create session: %s", err)})
+		return
+	}
+
+	_ = h.store.SetActiveInstance(userID, inst.ID)
+	_ = h.store.SetActiveSession(userID, newSession.ID)
+
+	title := fmt.Sprintf("Merge fix: %s", cs.Branch)
+	_ = h.store.UpdateClaudeSessionTitle(newSession.ID, title)
+
+	prompt := fmt.Sprintf(
+		"Please merge the git branch `%s` into the current branch and resolve any merge conflicts. "+
+			"Run `git merge %s`, resolve all conflicts, then commit the result.",
+		cs.Branch, cs.Branch,
+	)
+
+	h.startPrompt(ctx, b, inst, chatID, newSession.ID, title, prompt, 0, nil)
 }
 
 func (h *Handlers) callbackDeleteSession(ctx context.Context, b *bot.Bot, chatID int64, userID int64, sessionID string) {

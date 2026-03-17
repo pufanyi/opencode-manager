@@ -385,7 +385,7 @@ func (p *ClaudeCodeProvider) Prompt(ctx context.Context, sessionID string, conte
 			if mergeErr := p.mergeAndSync(sessionID, cs.WorktreePath, cs.Branch); mergeErr != nil {
 				slog.Error("auto-merge failed", "session", sessionID, "error", mergeErr)
 				select {
-				case ch <- StreamEvent{Type: "error", Error: fmt.Sprintf("Auto-merge failed: %s", mergeErr)}:
+				case ch <- StreamEvent{Type: "merge_failed", Error: mergeErr.Error(), MergeBranch: cs.Branch}:
 				default:
 				}
 			}

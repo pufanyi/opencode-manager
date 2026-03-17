@@ -26,14 +26,15 @@ type CreateSessionOpts struct {
 
 // StreamEvent is a normalized streaming event sent to the bot layer.
 type StreamEvent struct {
-	// Type: "text", "tool_use", "done", "error"
-	Type       string
-	Text       string // Accumulated text so far (for "text" events)
-	ToolName   string // For tool_use
-	ToolState  string // "running", "completed", "error"
-	ToolDetail string // Short description (e.g., Agent description)
-	Done       bool   // True when response is fully complete
-	Error      string // Non-empty on error events
+	// Type: "text", "tool_use", "done", "error", "merge_failed"
+	Type        string
+	Text        string // Accumulated text so far (for "text" events)
+	ToolName    string // For tool_use
+	ToolState   string // "running", "completed", "error"
+	ToolDetail  string // Short description (e.g., Agent description)
+	Done        bool   // True when response is fully complete
+	Error       string // Non-empty on error events
+	MergeBranch string // Branch name (for merge_failed events)
 }
 
 // Provider is the abstraction that bot handlers talk to.
