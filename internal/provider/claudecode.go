@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/pufanyi/opencode-manager/internal/store"
@@ -58,6 +59,28 @@ func (p *ClaudeCodeProvider) Stop() error {
 		p.activeCancel = nil
 	}
 	return nil
+}
+
+func (p *ClaudeCodeProvider) WaitReady(ctx context.Context, timeout time.Duration) error {
+	// Claude Code has no persistent server — just validate binary exists.
+	if _, err := exec.LookPath(p.binary); err != nil {
+		return fmt.Errorf("claude binary not found: %w", err)
+	}
+	return nil
+}
+
+func (p *ClaudeCodeProvider) Wait() error {
+	// No persistent process to wait on.
+	return nil
+}
+
+func (p *ClaudeCodeProvider) Stderr() string {
+	// No persistent process stderr.
+	return ""
+}
+
+func (p *ClaudeCodeProvider) SetPort(port int) {
+	// No-op: Claude Code doesn't use a port.
 }
 
 func (p *ClaudeCodeProvider) IsReady() bool {

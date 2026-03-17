@@ -1,6 +1,9 @@
 package provider
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Type identifies the backend.
 type Type string
@@ -37,6 +40,21 @@ type Provider interface {
 	Stop() error
 	IsReady() bool
 	HealthCheck(ctx context.Context) error
+
+	// WaitReady blocks until the provider is ready to accept requests.
+	// OpenCode polls HTTP; Claude Code validates binary and returns immediately.
+	WaitReady(ctx context.Context, timeout time.Duration) error
+
+	// Wait blocks until the underlying process exits.
+	// OpenCode blocks on cmd.Wait(); Claude Code returns nil (no persistent process).
+	Wait() error
+
+	// Stderr returns the last error output for crash diagnostics.
+	Stderr() string
+
+	// SetPort sets the port for providers that use one (OpenCode).
+	// No-op for providers without a persistent server (Claude Code).
+	SetPort(port int)
 
 	// --- Sessions ---
 	CreateSession(ctx context.Context) (*Session, error)

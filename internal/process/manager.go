@@ -17,32 +17,32 @@ import (
 type CrashCallback func(inst *Instance, err error)
 
 type Manager struct {
-	mu             sync.RWMutex
-	instances      map[string]*Instance // keyed by ID
-	opencodeBinary string
-	claudeBinary   string
-	portPool       *PortPool
-	store          *store.Store
-	healthInterval time.Duration
-	maxRestarts    int
-	onCrash        CrashCallback
+	mu              sync.RWMutex
+	instances       map[string]*Instance // keyed by ID
+	opencodeBinary  string
+	claudeCodeBinary string
+	portPool        *PortPool
+	store           *store.Store
+	healthInterval  time.Duration
+	maxRestarts     int
+	onCrash         CrashCallback
 
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
-func NewManager(ctx context.Context, opencodeBinary, claudeBinary string, portPool *PortPool, st *store.Store, healthInterval time.Duration, maxRestarts int) *Manager {
+func NewManager(ctx context.Context, opencodeBinary, claudeCodeBinary string, portPool *PortPool, st *store.Store, healthInterval time.Duration, maxRestarts int) *Manager {
 	mCtx, cancel := context.WithCancel(ctx)
 	return &Manager{
-		instances:      make(map[string]*Instance),
-		opencodeBinary: opencodeBinary,
-		claudeBinary:   claudeBinary,
-		portPool:       portPool,
-		store:          st,
-		healthInterval: healthInterval,
-		maxRestarts:    maxRestarts,
-		ctx:            mCtx,
-		cancel:         cancel,
+		instances:        make(map[string]*Instance),
+		opencodeBinary:   opencodeBinary,
+		claudeCodeBinary: claudeCodeBinary,
+		portPool:         portPool,
+		store:            st,
+		healthInterval:   healthInterval,
+		maxRestarts:      maxRestarts,
+		ctx:              mCtx,
+		cancel:           cancel,
 	}
 }
 
@@ -115,7 +115,7 @@ func (m *Manager) CreateAndStart(name, directory string, autoStart bool, provide
 func (m *Manager) createProvider(provType provider.Type, dir string, port int, password, instanceID string) provider.Provider {
 	switch provType {
 	case provider.TypeClaudeCode:
-		return provider.NewClaudeCodeProvider(m.claudeBinary, dir, m.store, instanceID)
+		return provider.NewClaudeCodeProvider(m.claudeCodeBinary, dir, m.store, instanceID)
 	default:
 		return provider.NewOpenCodeProvider(m.opencodeBinary, dir, port, password)
 	}
@@ -137,9 +137,7 @@ func (m *Manager) StartInstance(id string) error {
 		}
 		inst.Port = port
 		_ = m.store.UpdateInstancePort(id, port)
-		if ocp, ok := inst.Provider.(*provider.OpenCodeProvider); ok {
-			ocp.SetPort(port)
-		}
+		inst.Provider.SetPort(port)
 	}
 
 	return m.startInstance(inst)
@@ -156,28 +154,30 @@ func (m *Manager) startInstance(inst *Instance) error {
 	inst.SetStatus(StatusRunning)
 	_ = m.store.UpdateInstanceStatus(inst.ID, string(StatusRunning))
 
-	// For OpenCode: wait for ready and watch for crashes
-	if ocp, ok := inst.Provider.(*provider.OpenCodeProvider); ok {
-		go func() {
-			slog.Info("waiting for instance to be ready", "name", inst.Name)
-			if err := ocp.WaitReady(m.ctx, 60*time.Second); err != nil {
-				if m.ctx.Err() == nil {
-					slog.Error("instance not ready", "name", inst.Name, "error", err)
-				}
-				return
+	// Wait for the provider to become ready
+	go func() {
+		slog.Info("waiting for instance to be ready", "name", inst.Name)
+		if err := inst.Provider.WaitReady(m.ctx, 60*time.Second); err != nil {
+			if m.ctx.Err() == nil {
+				slog.Error("instance not ready", "name", inst.Name, "error", err)
 			}
-			slog.Info("instance ready", "name", inst.Name)
-		}()
+			return
+		}
+		slog.Info("instance ready", "name", inst.Name)
+	}()
 
-		go m.watchOpenCodeInstance(inst, ocp, 0)
-	}
+	// Watch for process crashes (meaningful for OpenCode; Wait() returns nil immediately for Claude Code)
+	go m.watchInstance(inst, 0)
 
 	return nil
 }
 
-func (m *Manager) watchOpenCodeInstance(inst *Instance, ocp *provider.OpenCodeProvider, restartCount int) {
-	err := ocp.Wait()
+// watchInstance blocks on the provider's Wait() and handles crash recovery.
+// For Claude Code, Wait() returns nil immediately — no crash recovery needed.
+func (m *Manager) watchInstance(inst *Instance, restartCount int) {
+	err := inst.Provider.Wait()
 	if err == nil {
+		// Clean exit or no persistent process (Claude Code) — nothing to do.
 		return
 	}
 
@@ -189,7 +189,7 @@ func (m *Manager) watchOpenCodeInstance(inst *Instance, ocp *provider.OpenCodePr
 		return
 	}
 
-	slog.Error("instance crashed", "name", inst.Name, "error", err, "restarts", restartCount, "stderr", ocp.Stderr())
+	slog.Error("instance crashed", "name", inst.Name, "error", err, "restarts", restartCount, "stderr", inst.Provider.Stderr())
 	inst.SetStatus(StatusFailed)
 	_ = m.store.UpdateInstanceStatus(inst.ID, string(StatusFailed))
 
@@ -198,7 +198,9 @@ func (m *Manager) watchOpenCodeInstance(inst *Instance, ocp *provider.OpenCodePr
 		if m.onCrash != nil {
 			m.onCrash(inst, fmt.Errorf("exceeded max restarts (%d): %w", m.maxRestarts, err))
 		}
-		m.portPool.Release(inst.Port)
+		if inst.ProviderType == provider.TypeOpenCode {
+			m.portPool.Release(inst.Port)
+		}
 		return
 	}
 
@@ -211,25 +213,30 @@ func (m *Manager) watchOpenCodeInstance(inst *Instance, ocp *provider.OpenCodePr
 		return
 	}
 
-	m.portPool.Release(inst.Port)
-	port, err2 := m.portPool.Allocate()
-	if err2 != nil {
-		slog.Error("failed to allocate port for restart", "name", inst.Name, "error", err2)
-		if m.onCrash != nil {
-			m.onCrash(inst, fmt.Errorf("port allocation failed: %w", err2))
+	// Re-allocate port for OpenCode instances
+	if inst.ProviderType == provider.TypeOpenCode {
+		m.portPool.Release(inst.Port)
+		port, err2 := m.portPool.Allocate()
+		if err2 != nil {
+			slog.Error("failed to allocate port for restart", "name", inst.Name, "error", err2)
+			if m.onCrash != nil {
+				m.onCrash(inst, fmt.Errorf("port allocation failed: %w", err2))
+			}
+			return
 		}
-		return
+		inst.Port = port
+		inst.Provider.SetPort(port)
+		_ = m.store.UpdateInstancePort(inst.ID, port)
 	}
-	inst.Port = port
-	ocp.SetPort(port)
-	_ = m.store.UpdateInstancePort(inst.ID, port)
 
 	if err := inst.Provider.Start(m.ctx); err != nil {
 		slog.Error("failed to restart instance", "name", inst.Name, "error", err)
 		if m.onCrash != nil {
 			m.onCrash(inst, fmt.Errorf("restart failed: %w", err))
 		}
-		m.portPool.Release(inst.Port)
+		if inst.ProviderType == provider.TypeOpenCode {
+			m.portPool.Release(inst.Port)
+		}
 		return
 	}
 
@@ -238,12 +245,12 @@ func (m *Manager) watchOpenCodeInstance(inst *Instance, ocp *provider.OpenCodePr
 
 	// Wait for ready again
 	go func() {
-		if err := ocp.WaitReady(m.ctx, 60*time.Second); err != nil && m.ctx.Err() == nil {
+		if err := inst.Provider.WaitReady(m.ctx, 60*time.Second); err != nil && m.ctx.Err() == nil {
 			slog.Error("restarted instance not ready", "name", inst.Name, "error", err)
 		}
 	}()
 
-	go m.watchOpenCodeInstance(inst, ocp, restartCount+1)
+	go m.watchInstance(inst, restartCount+1)
 }
 
 func (m *Manager) StopInstance(id string) error {

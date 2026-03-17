@@ -118,7 +118,7 @@ func (h *Handlers) HandleList(ctx context.Context, b *bot.Bot, update *models.Up
 	if len(instances) == 0 {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
-			Text:   "No instances. Use /new or /newclaude to create one.",
+			Text:   "No instances. Use /new or /newopencode to create one.",
 		})
 		return
 	}

@@ -84,6 +84,27 @@ func New(cfg *config.TelegramConfig, procMgr *process.Manager, st *store.Store) 
 
 func (b *Bot) Start(ctx context.Context) {
 	slog.Info("telegram bot starting")
+
+	// Register command list for Telegram autocomplete
+	_, err := b.bot.SetMyCommands(ctx, &bot.SetMyCommandsParams{
+		Commands: []models.BotCommand{
+			{Command: "new", Description: "Create Claude Code instance"},
+			{Command: "newopencode", Description: "Create OpenCode instance"},
+			{Command: "list", Description: "List all instances"},
+			{Command: "switch", Description: "Switch active instance"},
+			{Command: "status", Description: "Current instance & session info"},
+			{Command: "session", Description: "Show or create session"},
+			{Command: "sessions", Description: "List & manage sessions"},
+			{Command: "stop", Description: "Stop an instance"},
+			{Command: "start_inst", Description: "Start a stopped instance"},
+			{Command: "abort", Description: "Abort running prompt"},
+			{Command: "help", Description: "Show help"},
+		},
+	})
+	if err != nil {
+		slog.Warn("failed to set bot commands", "error", err)
+	}
+
 	b.bot.Start(ctx)
 }
 
