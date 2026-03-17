@@ -747,14 +747,12 @@ func (sm *StreamManager) refreshBoard() {
 func buildBoardHTML(entries []boardEntry) string {
 	var sb strings.Builder
 
-	// Bold header with task count
+	// Compact header — no long lines that wrap on mobile
 	taskWord := "task"
 	if len(entries) != 1 {
 		taskWord = "tasks"
 	}
-	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-	sb.WriteString(fmt.Sprintf("⚡ <b>ACTIVE TASKS</b>  ─  %d %s\n", len(entries), taskWord))
-	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	sb.WriteString(fmt.Sprintf("⚡ <b>ACTIVE TASKS</b>  ·  %d %s\n", len(entries), taskWord))
 
 	for _, e := range entries {
 		title := strings.ToValidUTF8(e.sessionTitle, "\uFFFD")
@@ -762,35 +760,31 @@ func buildBoardHTML(entries []boardEntry) string {
 			title = "(new)"
 		}
 		runes := []rune(title)
-		if len(runes) > 35 {
-			title = string(runes[:35]) + "…"
+		if len(runes) > 30 {
+			title = string(runes[:30]) + "…"
 		}
 
 		inst := strings.ToValidUTF8(e.instanceName, "\uFFFD")
 
-		// Each task as a blockquote card
+		// Each task as a blockquote card — Telegram renders with left border
 		sb.WriteString("\n<blockquote>")
 
 		// Task header: ID, instance name, elapsed time
-		sb.WriteString(fmt.Sprintf("<b>#%d  %s</b>  ·  ⏱ %s\n", e.taskID, escapeHTML(inst), formatElapsed(e.elapsed)))
+		sb.WriteString(fmt.Sprintf("<b>#%d  %s</b>  ·  %s\n", e.taskID, escapeHTML(inst), formatElapsed(e.elapsed)))
 
 		// Location + session title
 		if e.location != "" {
-			sb.WriteString(fmt.Sprintf("%s  <i>%s</i>\n", e.location, escapeHTML(title)))
+			sb.WriteString(fmt.Sprintf("%s <i>%s</i>\n", e.location, escapeHTML(title)))
 		} else {
 			sb.WriteString(fmt.Sprintf("<i>%s</i>\n", escapeHTML(title)))
 		}
 
-		// Inner separator
-		sb.WriteString("─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─\n")
+		// Blank line separates header from tools
+		sb.WriteString("\n")
 
 		// Hidden tools indicator
 		if e.hiddenTools > 0 {
-			sb.WriteString(fmt.Sprintf("<i>↑ %d earlier tool", e.hiddenTools))
-			if e.hiddenTools != 1 {
-				sb.WriteString("s")
-			}
-			sb.WriteString("</i>\n")
+			sb.WriteString(fmt.Sprintf("<i>… %d earlier</i>\n", e.hiddenTools))
 		}
 
 		// Tool list
@@ -804,8 +798,8 @@ func buildBoardHTML(entries []boardEntry) string {
 			icon := toolStateIcon(t.State)
 			detail := strings.ToValidUTF8(t.Detail, "\uFFFD")
 			detailRunes := []rune(detail)
-			if len(detailRunes) > 45 {
-				detail = string(detailRunes[:45]) + "…"
+			if len(detailRunes) > 40 {
+				detail = string(detailRunes[:40]) + "…"
 			}
 
 			name := escapeHTML(t.Name)
