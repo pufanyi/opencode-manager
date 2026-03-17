@@ -336,7 +336,7 @@ func (p *ClaudeCodeProvider) Prompt(ctx context.Context, sessionID string, conte
 		defer close(ch)
 		defer cancel()
 
-		var acc textAccumulator
+		var parser claudeParser
 
 		scanner := bufio.NewScanner(stdout)
 		scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
@@ -347,7 +347,7 @@ func (p *ClaudeCodeProvider) Prompt(ctx context.Context, sessionID string, conte
 				continue
 			}
 
-			evt := parseClaudeEvent(line, &acc)
+			evt := parser.parseEvent(line)
 			if evt != nil {
 				select {
 				case ch <- *evt:
@@ -442,13 +442,14 @@ type claudeEvent struct {
 	Type    string `json:"type"`
 	Subtype string `json:"subtype,omitempty"`
 
-	Event     *claudeStreamEvent     `json:"event,omitempty"`
-	Message   *claudeMessage         `json:"message,omitempty"`
-	Result    string                 `json:"result,omitempty"`
-	IsError   bool                   `json:"is_error,omitempty"`
-	Error     string                 `json:"error,omitempty"`
-	Tool      *claudeTool            `json:"tool,omitempty"`
-	ToolInput map[string]interface{} `json:"tool_input,omitempty"`
+	Event         *claudeStreamEvent     `json:"event,omitempty"`
+	Message       *claudeMessage         `json:"message,omitempty"`
+	Result        string                 `json:"result,omitempty"`
+	IsError       bool                   `json:"is_error,omitempty"`
+	Error         string                 `json:"error,omitempty"`
+	Tool          *claudeTool            `json:"tool,omitempty"`
+	ToolInput     map[string]interface{} `json:"tool_input,omitempty"`
+	ToolUseResult json.RawMessage        `json:"tool_use_result,omitempty"`
 }
 
 type claudeStreamEvent struct {
@@ -458,8 +459,9 @@ type claudeStreamEvent struct {
 }
 
 type claudeDelta struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	PartialJSON string `json:"partial_json,omitempty"`
 }
 
 type claudeMessage struct {
@@ -467,9 +469,10 @@ type claudeMessage struct {
 }
 
 type claudeBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
-	Name string `json:"name,omitempty"`
+	Type  string                 `json:"type"`
+	Text  string                 `json:"text,omitempty"`
+	Name  string                 `json:"name,omitempty"`
+	Input map[string]interface{} `json:"input,omitempty"`
 }
 
 type claudeTool struct {
@@ -477,17 +480,21 @@ type claudeTool struct {
 	Input map[string]interface{} `json:"input,omitempty"`
 }
 
-type textAccumulator struct {
-	buf strings.Builder
+// claudeParser tracks state across stream-json events.
+type claudeParser struct {
+	textBuf      strings.Builder
+	currentTool  string          // tool name from the current content_block_start
+	inputBuf     strings.Builder // accumulates input_json_delta for current tool
+	pendingTools []string        // FIFO of tools awaiting results
 }
 
-func (a *textAccumulator) append(delta string) string {
-	a.buf.WriteString(delta)
-	return a.buf.String()
+func (p *claudeParser) appendText(delta string) string {
+	p.textBuf.WriteString(delta)
+	return p.textBuf.String()
 }
 
-func (a *textAccumulator) reset() {
-	a.buf.Reset()
+func (p *claudeParser) resetText() {
+	p.textBuf.Reset()
 }
 
 // extractToolDetail extracts a human-readable detail string from tool input.
@@ -566,7 +573,8 @@ func shortenPath(p string) string {
 	return strings.Join(parts[len(parts)-2:], "/")
 }
 
-func parseClaudeEvent(line []byte, acc *textAccumulator) *StreamEvent {
+// parseEvent parses a single stream-json line and returns a StreamEvent if relevant.
+func (p *claudeParser) parseEvent(line []byte) *StreamEvent {
 	var evt claudeEvent
 	if err := json.Unmarshal(line, &evt); err != nil {
 		return nil
@@ -578,49 +586,81 @@ func parseClaudeEvent(line []byte, acc *textAccumulator) *StreamEvent {
 			return nil
 		}
 		switch evt.Event.Type {
-		case "content_block_delta":
-			if evt.Event.Delta != nil && evt.Event.Delta.Type == "text_delta" && evt.Event.Delta.Text != "" {
-				fullText := acc.append(evt.Event.Delta.Text)
-				return &StreamEvent{Type: "text", Text: fullText}
-			}
 		case "content_block_start":
 			if evt.Event.ContentBlock != nil && evt.Event.ContentBlock.Type == "tool_use" {
-				return &StreamEvent{Type: "tool_use", ToolName: evt.Event.ContentBlock.Name, ToolState: "running"}
+				name := evt.Event.ContentBlock.Name
+				p.currentTool = name
+				p.inputBuf.Reset()
+				p.pendingTools = append(p.pendingTools, name)
+				return &StreamEvent{Type: "tool_use", ToolName: name, ToolState: "running"}
+			}
+
+		case "content_block_delta":
+			if evt.Event.Delta == nil {
+				return nil
+			}
+			switch evt.Event.Delta.Type {
+			case "text_delta":
+				if evt.Event.Delta.Text != "" {
+					fullText := p.appendText(evt.Event.Delta.Text)
+					return &StreamEvent{Type: "text", Text: fullText}
+				}
+			case "input_json_delta":
+				p.inputBuf.WriteString(evt.Event.Delta.PartialJSON)
+			}
+
+		case "content_block_stop":
+			// Tool call fully generated — parse accumulated input for detail.
+			if p.currentTool != "" {
+				name := p.currentTool
+				p.currentTool = ""
+				detail := p.extractDetailFromInputBuf(name)
+				if detail != "" {
+					return &StreamEvent{Type: "tool_use", ToolName: name, ToolState: "running", ToolDetail: detail}
+				}
 			}
 		}
 
 	case "assistant":
-		if evt.Message != nil {
-			var text string
-			for _, block := range evt.Message.Content {
-				if block.Type == "text" {
-					text += block.Text
+		if evt.Message == nil {
+			return nil
+		}
+		// Extract text and tool details from the complete message.
+		var text string
+		for _, block := range evt.Message.Content {
+			switch block.Type {
+			case "text":
+				text += block.Text
+			case "tool_use":
+				if block.Name != "" && block.Input != nil {
+					detail := extractToolDetailFromMap(block.Name, block.Input)
+					if detail != "" {
+						return &StreamEvent{Type: "tool_use", ToolName: block.Name, ToolState: "running", ToolDetail: detail}
+					}
 				}
 			}
-			if text != "" {
-				acc.reset()
-				acc.append(text)
-				return &StreamEvent{Type: "text", Text: text}
+		}
+		if text != "" {
+			p.resetText()
+			p.appendText(text)
+			return &StreamEvent{Type: "text", Text: text}
+		}
+
+	case "user":
+		// A "user" event with tool_use_result means a tool finished executing.
+		if evt.ToolUseResult != nil && len(p.pendingTools) > 0 {
+			name := p.pendingTools[0]
+			p.pendingTools = p.pendingTools[1:]
+
+			state := "completed"
+			// String result starting with "Error:" indicates tool error.
+			if len(evt.ToolUseResult) > 0 && evt.ToolUseResult[0] == '"' {
+				var s string
+				if json.Unmarshal(evt.ToolUseResult, &s) == nil && strings.HasPrefix(s, "Error:") {
+					state = "error"
+				}
 			}
-		}
-
-	case "tool_use":
-		name := ""
-		if evt.Tool != nil {
-			name = evt.Tool.Name
-		}
-		if name != "" {
-			detail := extractToolDetail(name, evt.Tool, evt.ToolInput)
-			return &StreamEvent{Type: "tool_use", ToolName: name, ToolState: "running", ToolDetail: detail}
-		}
-
-	case "tool_result":
-		name := ""
-		if evt.Tool != nil {
-			name = evt.Tool.Name
-		}
-		if name != "" {
-			return &StreamEvent{Type: "tool_use", ToolName: name, ToolState: "completed"}
+			return &StreamEvent{Type: "tool_use", ToolName: name, ToolState: state}
 		}
 
 	case "result":
@@ -635,4 +675,23 @@ func parseClaudeEvent(line []byte, acc *textAccumulator) *StreamEvent {
 	}
 
 	return nil
+}
+
+// extractDetailFromInputBuf parses the accumulated input JSON buffer
+// and extracts a human-readable detail string.
+func (p *claudeParser) extractDetailFromInputBuf(name string) string {
+	raw := p.inputBuf.String()
+	if raw == "" {
+		return ""
+	}
+	var input map[string]interface{}
+	if json.Unmarshal([]byte(raw), &input) != nil {
+		return ""
+	}
+	return extractToolDetailFromMap(name, input)
+}
+
+// extractToolDetailFromMap extracts a human-readable detail string from a tool input map.
+func extractToolDetailFromMap(name string, input map[string]interface{}) string {
+	return extractToolDetail(name, &claudeTool{Input: input}, nil)
 }

@@ -670,7 +670,7 @@ func buildBoardHTML(entries []boardEntry) string {
 	var sb strings.Builder
 	sb.WriteString("📋 <b>Active Tasks</b>\n")
 
-	for _, e := range entries {
+	for i, e := range entries {
 		title := strings.ToValidUTF8(e.sessionTitle, "\uFFFD")
 		if title == "" {
 			title = "(new)"
@@ -682,33 +682,38 @@ func buildBoardHTML(entries []boardEntry) string {
 
 		inst := strings.ToValidUTF8(e.instanceName, "\uFFFD")
 
-		sb.WriteString(fmt.Sprintf("\n<b>#%d</b> %s\n", e.taskID, escapeHTML(inst)))
-		sb.WriteString(fmt.Sprintf("  %s (%s)\n", escapeHTML(title), formatElapsed(e.elapsed)))
+		// Extra blank line between tasks
+		if i > 0 {
+			sb.WriteString("\n")
+		}
 
-		for i, t := range e.tools {
+		sb.WriteString(fmt.Sprintf("\n<b>#%d</b> %s\n", e.taskID, escapeHTML(inst)))
+		sb.WriteString(fmt.Sprintf("  <i>%s</i> · ⏱ %s\n", escapeHTML(title), formatElapsed(e.elapsed)))
+
+		for j, t := range e.tools {
 			prefix := "├"
-			if i == len(e.tools)-1 {
+			if j == len(e.tools)-1 {
 				prefix = "└"
 			}
 
 			// "Thinking" state — no tool name
 			if t.Name == "" {
-				sb.WriteString(fmt.Sprintf("  %s 💭 %s\n", prefix, escapeHTML(t.Detail)))
+				sb.WriteString(fmt.Sprintf("  %s 💭 <i>%s</i>\n", prefix, escapeHTML(t.Detail)))
 				continue
 			}
 
 			icon := toolStateIcon(t.State)
 			detail := strings.ToValidUTF8(t.Detail, "\uFFFD")
 			detailRunes := []rune(detail)
-			if len(detailRunes) > 40 {
-				detail = string(detailRunes[:40]) + ".."
+			if len(detailRunes) > 50 {
+				detail = string(detailRunes[:50]) + ".."
 			}
 
 			name := escapeHTML(t.Name)
 			if detail != "" {
-				sb.WriteString(fmt.Sprintf("  %s %s %s: %s\n", prefix, icon, name, escapeHTML(detail)))
+				sb.WriteString(fmt.Sprintf("  %s %s <b>%s</b>  <code>%s</code>\n", prefix, icon, name, escapeHTML(detail)))
 			} else {
-				sb.WriteString(fmt.Sprintf("  %s %s %s\n", prefix, icon, name))
+				sb.WriteString(fmt.Sprintf("  %s %s <b>%s</b>\n", prefix, icon, name))
 			}
 		}
 	}
@@ -720,7 +725,7 @@ func buildBoardHTML(entries []boardEntry) string {
 func toolStateIcon(state string) string {
 	switch state {
 	case "running":
-		return "🔄"
+		return "⏳"
 	case "completed":
 		return "✅"
 	case "error":
