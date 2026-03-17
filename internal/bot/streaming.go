@@ -729,17 +729,22 @@ func (sm *StreamManager) refreshBoard() {
 		}
 	}
 
-	// Clean up boards for chats with no active streams
+	// Show empty state for chats with no active streams
+	emptyContent := "⚡ <b>ACTIVE TASKS</b>  ·  No tasks running"
 	for chatID, msgID := range sm.boardMsgs {
 		if _, has := chatEntries[chatID]; !has && msgID != 0 {
+			if sm.boardContent[chatID] == emptyContent {
+				continue
+			}
 			sm.semaphore <- struct{}{}
-			_, _ = b.DeleteMessage(context.Background(), &bot.DeleteMessageParams{
+			_, _ = b.EditMessageText(context.Background(), &bot.EditMessageTextParams{
 				ChatID:    chatID,
 				MessageID: msgID,
+				Text:      emptyContent,
+				ParseMode: models.ParseModeHTML,
 			})
 			<-sm.semaphore
-			delete(sm.boardMsgs, chatID)
-			delete(sm.boardContent, chatID)
+			sm.boardContent[chatID] = emptyContent
 		}
 	}
 }
