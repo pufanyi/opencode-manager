@@ -17,6 +17,7 @@ const (
 	maxMessageLen   = 4096
 	fileFallbackLen = 12000
 	editInterval    = 1500 * time.Millisecond
+	draftInterval   = 500 * time.Millisecond // Faster updates for drafts
 )
 
 // StreamContext manages streaming provider events to a Telegram message.
@@ -24,9 +25,13 @@ type StreamContext struct {
 	mu           sync.Mutex
 	b            *bot.Bot
 	chatID       int64
-	messageID    int
+	messageID    int // Used for editMessageText fallback
 	sessionID    string
 	instanceName string
+
+	// Draft mode (private chats)
+	useDraft bool
+	draftID  string
 
 	content  strings.Builder
 	dirty    bool
@@ -53,12 +58,21 @@ func NewStreamManager() *StreamManager {
 func (sm *StreamManager) StartStream(b *bot.Bot, chatID int64, messageID int, sessionID, instanceName string, ch <-chan provider.StreamEvent) *StreamContext {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Private chats (chatID > 0) use sendMessageDraft for native streaming
+	useDraft := chatID > 0
+	draftID := ""
+	if useDraft {
+		draftID = fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+
 	sc := &StreamContext{
 		b:            b,
 		chatID:       chatID,
 		messageID:    messageID,
 		sessionID:    sessionID,
 		instanceName: instanceName,
+		useDraft:     useDraft,
+		draftID:      draftID,
 		cancel:       cancel,
 		lastEdit:     time.Now(),
 	}
@@ -70,10 +84,8 @@ func (sm *StreamManager) StartStream(b *bot.Bot, chatID int64, messageID int, se
 	sm.streams[sessionID] = sc
 	sm.mu.Unlock()
 
-	// Consume events from provider channel
 	go sc.consumeStream(ctx, ch)
-	// Periodic flush to Telegram
-	go sc.editLoop(ctx, sm.semaphore)
+	go sc.flushLoop(ctx, sm.semaphore)
 
 	return sc
 }
@@ -89,8 +101,6 @@ func (sm *StreamManager) RemoveStream(sessionID string) {
 
 // consumeStream reads from the provider's event channel and accumulates content.
 func (sc *StreamContext) consumeStream(ctx context.Context, ch <-chan provider.StreamEvent) {
-	var textBuf strings.Builder
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -107,8 +117,6 @@ func (sc *StreamContext) consumeStream(ctx context.Context, ch <-chan provider.S
 			sc.mu.Lock()
 			switch evt.Type {
 			case "text":
-				textBuf.Reset()
-				textBuf.WriteString(evt.Text)
 				sc.content.Reset()
 				sc.content.WriteString(evt.Text)
 				sc.dirty = true
@@ -122,7 +130,6 @@ func (sc *StreamContext) consumeStream(ctx context.Context, ch <-chan provider.S
 				case "error":
 					icon = "❌"
 				}
-				// Append tool line after current text
 				current := sc.content.String()
 				sc.content.Reset()
 				sc.content.WriteString(current)
@@ -142,8 +149,13 @@ func (sc *StreamContext) consumeStream(ctx context.Context, ch <-chan provider.S
 	}
 }
 
-func (sc *StreamContext) editLoop(ctx context.Context, semaphore chan struct{}) {
-	ticker := time.NewTicker(editInterval)
+func (sc *StreamContext) flushLoop(ctx context.Context, semaphore chan struct{}) {
+	interval := editInterval
+	if sc.useDraft {
+		interval = draftInterval
+	}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -187,9 +199,86 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 
 	if len(fullContent) > fileFallbackLen {
 		sc.sendAsFile(content)
+		if sc.useDraft {
+			sc.finalizeDraft("")
+		}
 		return
 	}
 
+	if sc.useDraft {
+		sc.flushDraft(fullContent, done || final, semaphore)
+	} else {
+		sc.flushEdit(fullContent, rendered, header, done || final, semaphore)
+	}
+}
+
+// flushDraft sends updates via sendMessageDraft, finalizes with sendMessage when done.
+func (sc *StreamContext) flushDraft(fullContent string, final bool, semaphore chan struct{}) {
+	if len(fullContent) > maxMessageLen {
+		// Draft doesn't support splitting; truncate with indicator
+		fullContent = fullContent[:maxMessageLen-10] + "\n..."
+	}
+
+	semaphore <- struct{}{}
+	defer func() { <-semaphore }()
+
+	if !final {
+		// Streaming update — add cursor indicator
+		display := fullContent + " ▌"
+		if len(display) > maxMessageLen {
+			display = fullContent
+		}
+
+		_, err := sc.b.SendMessageDraft(context.Background(), &bot.SendMessageDraftParams{
+			ChatID:    sc.chatID,
+			DraftID:   sc.draftID,
+			Text:      display,
+			ParseMode: models.ParseModeHTML,
+		})
+		if err != nil {
+			slog.Debug("draft failed, falling back to edit", "error", err)
+			sc.useDraft = false
+		}
+		return
+	}
+
+	// Final — send as permanent message with keyboard
+	sc.finalizeDraft(fullContent)
+}
+
+// finalizeDraft converts the draft into a permanent message.
+func (sc *StreamContext) finalizeDraft(fullContent string) {
+	params := &bot.SendMessageParams{
+		ChatID:    sc.chatID,
+		ParseMode: models.ParseModeHTML,
+	}
+
+	if fullContent != "" {
+		params.Text = fullContent
+	} else {
+		params.Text = fmt.Sprintf("<b>[%s]</b> Done.", escapeHTML(sc.instanceName))
+	}
+	params.ReplyMarkup = promptDoneKeyboard(sc.sessionID)
+
+	msg, err := sc.b.SendMessage(context.Background(), params)
+	if err != nil {
+		slog.Error("failed to finalize draft", "error", err)
+		return
+	}
+
+	// Delete the placeholder message (the "Thinking..." message)
+	sc.b.DeleteMessage(context.Background(), &bot.DeleteMessageParams{
+		ChatID:    sc.chatID,
+		MessageID: sc.messageID,
+	})
+
+	sc.mu.Lock()
+	sc.messages = append(sc.messages, msg.ID)
+	sc.mu.Unlock()
+}
+
+// flushEdit is the fallback for group chats — uses editMessageText.
+func (sc *StreamContext) flushEdit(fullContent, rendered, header string, final bool, semaphore chan struct{}) {
 	if len(fullContent) > maxMessageLen {
 		sc.handleLongMessage(header, rendered, semaphore)
 		return
@@ -212,7 +301,7 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 		ParseMode: models.ParseModeHTML,
 	}
 
-	if done || final {
+	if final {
 		params.ReplyMarkup = promptDoneKeyboard(sc.sessionID)
 	}
 
