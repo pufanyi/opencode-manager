@@ -182,7 +182,8 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 	}
 
 	header := fmt.Sprintf("<b>[%s]</b>\n\n", escapeHTML(sc.instanceName))
-	fullContent := header + content
+	rendered := markdownToTelegramHTML(content)
+	fullContent := header + rendered
 
 	if len(fullContent) > fileFallbackLen {
 		sc.sendAsFile(content)
@@ -190,7 +191,7 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 	}
 
 	if len(fullContent) > maxMessageLen {
-		sc.handleLongMessage(header, content, semaphore)
+		sc.handleLongMessage(header, rendered, semaphore)
 		return
 	}
 
