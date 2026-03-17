@@ -680,13 +680,15 @@ func buildBoardHTML(entries []boardEntry) string {
 
 		inst := strings.ToValidUTF8(e.instanceName, "\uFFFD")
 
-		// Extra blank line between tasks
+		// Visual separator between tasks
 		if i > 0 {
-			sb.WriteString("\n")
+			sb.WriteString("┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n")
 		}
 
-		sb.WriteString(fmt.Sprintf("\n<b>#%d</b> %s\n", e.taskID, escapeHTML(inst)))
-		sb.WriteString(fmt.Sprintf("  <i>%s</i> · ⏱ %s\n", escapeHTML(title), formatElapsed(e.elapsed)))
+		// Header: task ID, instance, elapsed — all on one bold line
+		sb.WriteString(fmt.Sprintf("\n<b>#%d  %s</b>  (%s)\n", e.taskID, escapeHTML(inst), formatElapsed(e.elapsed)))
+		// Session title in italics to distinguish from other elements
+		sb.WriteString(fmt.Sprintf("<i>  %s</i>\n", escapeHTML(title)))
 
 		for j, t := range e.tools {
 			prefix := "├"
