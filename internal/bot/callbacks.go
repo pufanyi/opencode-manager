@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 
@@ -57,6 +58,8 @@ func (h *Handlers) HandleCallback(ctx context.Context, b *bot.Bot, update *model
 		h.callbackStopTask(ctx, b, chatID, taskID)
 	case "mergefix":
 		h.callbackMergeFix(ctx, b, chatID, userID, param)
+	case "mainq":
+		h.callbackMainDirConflict(ctx, b, chatID, userID, param)
 	default:
 		slog.Warn("unknown callback action", "action", action)
 	}
@@ -228,6 +231,18 @@ func (h *Handlers) callbackMergeFix(ctx context.Context, b *bot.Bot, chatID int6
 		return
 	}
 
+	// Check if main dir is busy before creating a merge-fix session
+	if locker, ok := inst.Provider.(provider.MainDirLocker); ok && locker.IsMainDirBusy("") {
+		prompt := fmt.Sprintf(
+			"Please merge the git branch `%s` into the current branch and resolve any merge conflicts. "+
+				"Run `git merge %s`, resolve all conflicts, then commit the result.",
+			cs.Branch, cs.Branch,
+		)
+		title := fmt.Sprintf("Merge fix: %s", cs.Branch)
+		h.showMainDirConflict(ctx, b, inst, userID, chatID, 0, prompt, title, "", nil)
+		return
+	}
+
 	// Create a new session in the main directory (no worktree) to fix the merge
 	newSession, err := inst.Provider.CreateSession(ctx, nil)
 	if err != nil {
@@ -343,6 +358,14 @@ func (h *Handlers) callbackWorktreeChoice(ctx context.Context, b *bot.Bot, chatI
 
 	useWorktree := mode == "worktree"
 
+	// If user chose "Main Directory", check if main dir is busy
+	if !useWorktree {
+		if locker, ok := pp.inst.Provider.(provider.MainDirLocker); ok && locker.IsMainDirBusy("") {
+			h.showMainDirConflict(ctx, b, pp.inst, pp.userID, pp.chatID, pp.replyMsgID, pp.text, pp.titleHint, "", pp.cleanupFiles)
+			return
+		}
+	}
+
 	if pp.text != "" {
 		// Prompt pending — create session and run prompt
 		h.createSessionAndPrompt(ctx, b, pp.inst, pp.userID, pp.chatID, pp.replyMsgID, pp.text, pp.titleHint, useWorktree, pp.cleanupFiles)
@@ -365,5 +388,55 @@ func (h *Handlers) callbackWorktreeChoice(ctx context.Context, b *bot.Bot, chatI
 			Text:      fmt.Sprintf("<b>[%s]</b> New session (%s): <code>%s</code>", escapeHTML(pp.inst.Name), locLabel, session.ID),
 			ParseMode: models.ParseModeHTML,
 		})
+	}
+}
+
+func (h *Handlers) callbackMainDirConflict(ctx context.Context, b *bot.Bot, chatID int64, userID int64, mode string) {
+	h.pendingMu.Lock()
+	pp, ok := h.pendingPrompts[userID]
+	if ok {
+		delete(h.pendingPrompts, userID)
+	}
+	h.pendingMu.Unlock()
+
+	if !ok || pp == nil {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   "No pending task found. Please send your message again.",
+		})
+		return
+	}
+
+	// Delete the conflict message
+	if pp.choiceMsgID != 0 {
+		_, _ = b.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: chatID, MessageID: pp.choiceMsgID})
+	}
+
+	switch mode {
+	case "queue":
+		h.queueMainDirPrompt(b, pp)
+	case "worktree":
+		if pp.text != "" {
+			h.createSessionAndPrompt(ctx, b, pp.inst, pp.userID, pp.chatID, pp.replyMsgID, pp.text, pp.titleHint, true, pp.cleanupFiles)
+		} else {
+			// Pure session creation with worktree
+			opts := &provider.CreateSessionOpts{UseWorktree: true}
+			session, err := pp.inst.Provider.CreateSession(ctx, opts)
+			if err != nil {
+				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to create session: %s", err)})
+				return
+			}
+			_ = h.store.SetActiveSession(pp.userID, session.ID)
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:    chatID,
+				Text:      fmt.Sprintf("<b>[%s]</b> New session (🌿 worktree): <code>%s</code>", escapeHTML(pp.inst.Name), session.ID),
+				ParseMode: models.ParseModeHTML,
+			})
+		}
+	case "cancel":
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Cancelled."})
+		for _, f := range pp.cleanupFiles {
+			os.Remove(f)
+		}
 	}
 }

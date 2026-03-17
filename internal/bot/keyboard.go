@@ -117,3 +117,15 @@ func worktreeChoiceKeyboard() *models.InlineKeyboardMarkup {
 		},
 	}
 }
+
+func mainDirConflictKeyboard() *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{
+		InlineKeyboard: [][]models.InlineKeyboardButton{
+			{
+				{Text: "⏳ Queue", CallbackData: "mainq:queue"},
+				{Text: "🌿 Worktree", CallbackData: "mainq:worktree"},
+				{Text: "❌ Cancel", CallbackData: "mainq:cancel"},
+			},
+		},
+	}
+}

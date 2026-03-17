@@ -21,7 +21,7 @@ import (
 	"github.com/pufanyi/opencode-manager/internal/store"
 )
 
-// pendingPrompt stores a prompt waiting for the user's worktree choice.
+// pendingPrompt stores a prompt waiting for the user's worktree/conflict choice.
 type pendingPrompt struct {
 	text         string // prompt content (empty for pure session creation)
 	inst         *process.Instance
@@ -30,7 +30,8 @@ type pendingPrompt struct {
 	replyMsgID   int
 	titleHint    string
 	cleanupFiles []string // temp files to remove on discard
-	choiceMsgID  int      // ID of the "where to work?" message
+	choiceMsgID  int      // ID of the "where to work?" / conflict message
+	sessionID    string   // non-empty when continuing an existing session
 }
 
 type Handlers struct {
@@ -523,9 +524,17 @@ func (h *Handlers) HandlePrompt(ctx context.Context, b *bot.Bot, update *models.
 	// Try to continue existing session from reply
 	if update.Message.ReplyToMessage != nil {
 		if sessionID, _ := h.store.GetSessionByMessage(chatID, update.Message.ReplyToMessage.ID); sessionID != "" {
+			// Check main-dir busy for main-dir sessions
+			cs, _ := h.store.GetClaudeSession(sessionID)
+			if cs != nil && cs.WorktreePath == "" {
+				if locker, ok := inst.Provider.(provider.MainDirLocker); ok && locker.IsMainDirBusy(sessionID) {
+					h.showMainDirConflict(ctx, b, inst, userID, chatID, update.Message.ID, text, text, sessionID, nil)
+					return
+				}
+			}
 			_ = h.store.SetActiveSession(userID, sessionID)
 			title := ""
-			if cs, _ := h.store.GetClaudeSession(sessionID); cs != nil {
+			if cs != nil {
 				title = cs.Title
 			}
 			h.startPrompt(ctx, b, inst, chatID, sessionID, title, text, update.Message.ID, nil)
@@ -562,9 +571,22 @@ func (h *Handlers) HandlePhoto(ctx context.Context, b *bot.Bot, update *models.U
 	// Try to continue existing session from reply
 	if update.Message.ReplyToMessage != nil {
 		if sessionID, _ := h.store.GetSessionByMessage(chatID, update.Message.ReplyToMessage.ID); sessionID != "" {
+			// Check main-dir busy for main-dir sessions
+			cs, _ := h.store.GetClaudeSession(sessionID)
+			if cs != nil && cs.WorktreePath == "" {
+				if locker, ok := inst.Provider.(provider.MainDirLocker); ok && locker.IsMainDirBusy(sessionID) {
+					localPath, prompt, photoErr := h.buildPhotoPrompt(ctx, b, update, inst, caption)
+					if photoErr != nil {
+						_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: photoErr.Error()})
+						return
+					}
+					h.showMainDirConflict(ctx, b, inst, userID, chatID, update.Message.ID, prompt, titleHint, sessionID, []string{localPath})
+					return
+				}
+			}
 			_ = h.store.SetActiveSession(userID, sessionID)
 			title := ""
-			if cs, _ := h.store.GetClaudeSession(sessionID); cs != nil {
+			if cs != nil {
 				title = cs.Title
 			}
 			localPath, prompt, err := h.buildPhotoPrompt(ctx, b, update, inst, caption)
@@ -741,14 +763,33 @@ func (h *Handlers) createSessionAndPrompt(ctx context.Context, b *bot.Bot, inst 
 }
 
 // startPrompt starts a prompt stream for an existing session.
+// It acquires the main-dir lock for main-dir sessions and registers a
+// release callback on the stream.
 func (h *Handlers) startPrompt(ctx context.Context, b *bot.Bot, inst *process.Instance, chatID int64, sessionID, sessionTitle, text string, replyMsgID int, cleanupFiles []string) {
 	_ = h.store.UpdateClaudeSessionActivity(sessionID)
 	_ = h.store.SetMessageSession(chatID, replyMsgID, sessionID)
+
+	// Acquire main-dir lock if this is a main-dir session.
+	var releaseFunc func()
+	if locker, ok := inst.Provider.(provider.MainDirLocker); ok {
+		cs, _ := h.store.GetClaudeSession(sessionID)
+		if cs != nil && cs.WorktreePath == "" {
+			if !locker.TryAcquireMainDir(sessionID) {
+				slog.Warn("main dir busy at startPrompt (race)", "session", sessionID)
+			} else {
+				sid := sessionID
+				releaseFunc = func() { locker.ReleaseMainDir(sid) }
+			}
+		}
+	}
 
 	promptCtx, promptCancel := context.WithCancel(context.Background())
 	ch, err := inst.Provider.Prompt(promptCtx, sessionID, text)
 	if err != nil {
 		promptCancel()
+		if releaseFunc != nil {
+			releaseFunc()
+		}
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    chatID,
 			Text:      fmt.Sprintf("<b>[%s]</b> Failed to send prompt: %s", escapeHTML(inst.Name), err),
@@ -765,6 +806,117 @@ func (h *Handlers) startPrompt(ctx context.Context, b *bot.Bot, inst *process.In
 	for _, f := range cleanupFiles {
 		sc.AddCleanupFile(f)
 	}
+	if releaseFunc != nil {
+		sc.OnDone(releaseFunc)
+	}
+}
+
+// showMainDirConflict stores a pending prompt and shows the main-dir conflict keyboard.
+func (h *Handlers) showMainDirConflict(ctx context.Context, b *bot.Bot, inst *process.Instance, userID, chatID int64, replyMsgID int, text, titleHint, sessionID string, cleanupFiles []string) {
+	h.pendingMu.Lock()
+	old := h.pendingPrompts[userID]
+	pp := &pendingPrompt{
+		text:         text,
+		inst:         inst,
+		userID:       userID,
+		chatID:       chatID,
+		replyMsgID:   replyMsgID,
+		titleHint:    titleHint,
+		sessionID:    sessionID,
+		cleanupFiles: cleanupFiles,
+	}
+	h.pendingPrompts[userID] = pp
+	h.pendingMu.Unlock()
+
+	// Clean up old pending if any
+	if old != nil {
+		if old.choiceMsgID != 0 {
+			_, _ = b.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: old.chatID, MessageID: old.choiceMsgID})
+		}
+		for _, f := range old.cleanupFiles {
+			os.Remove(f)
+		}
+	}
+
+	params := &bot.SendMessageParams{
+		ChatID:      chatID,
+		Text:        fmt.Sprintf("<b>[%s]</b> Main directory is busy. What would you like to do?", escapeHTML(inst.Name)),
+		ParseMode:   models.ParseModeHTML,
+		ReplyMarkup: mainDirConflictKeyboard(),
+	}
+	if replyMsgID != 0 {
+		params.ReplyParameters = &models.ReplyParameters{
+			MessageID:                replyMsgID,
+			AllowSendingWithoutReply: true,
+		}
+	}
+	msg, _ := b.SendMessage(ctx, params)
+	if msg != nil {
+		h.pendingMu.Lock()
+		if current, ok := h.pendingPrompts[userID]; ok && current == pp {
+			current.choiceMsgID = msg.ID
+		}
+		h.pendingMu.Unlock()
+	}
+}
+
+// queueMainDirPrompt waits for the main directory to become free, then
+// creates a session and starts the prompt.
+func (h *Handlers) queueMainDirPrompt(b *bot.Bot, pp *pendingPrompt) {
+	locker, ok := pp.inst.Provider.(provider.MainDirLocker)
+	if !ok {
+		// No locking support — just proceed immediately
+		if pp.sessionID != "" {
+			title := pp.titleHint
+			if cs, _ := h.store.GetClaudeSession(pp.sessionID); cs != nil && cs.Title != "" {
+				title = cs.Title
+			}
+			h.startPrompt(context.Background(), b, pp.inst, pp.chatID, pp.sessionID, title, pp.text, pp.replyMsgID, pp.cleanupFiles)
+		} else {
+			h.createSessionAndPrompt(context.Background(), b, pp.inst, pp.userID, pp.chatID, pp.replyMsgID, pp.text, pp.titleHint, false, pp.cleanupFiles)
+		}
+		return
+	}
+
+	_, _ = b.SendMessage(context.Background(), &bot.SendMessageParams{
+		ChatID:    pp.chatID,
+		Text:      fmt.Sprintf("<b>[%s]</b> Queued — waiting for main directory...", escapeHTML(pp.inst.Name)),
+		ParseMode: models.ParseModeHTML,
+	})
+
+	go func() {
+		timeout := time.After(10 * time.Minute)
+		for {
+			freeCh := locker.WaitMainDirFree()
+			select {
+			case <-freeCh:
+				sid := pp.sessionID
+				if !locker.IsMainDirBusy(sid) {
+					if pp.sessionID != "" {
+						title := pp.titleHint
+						if cs, _ := h.store.GetClaudeSession(pp.sessionID); cs != nil && cs.Title != "" {
+							title = cs.Title
+						}
+						h.startPrompt(context.Background(), b, pp.inst, pp.chatID, pp.sessionID, title, pp.text, pp.replyMsgID, pp.cleanupFiles)
+					} else {
+						h.createSessionAndPrompt(context.Background(), b, pp.inst, pp.userID, pp.chatID, pp.replyMsgID, pp.text, pp.titleHint, false, pp.cleanupFiles)
+					}
+					return
+				}
+				// Another waiter grabbed it — wait again
+			case <-timeout:
+				_, _ = b.SendMessage(context.Background(), &bot.SendMessageParams{
+					ChatID:    pp.chatID,
+					Text:      fmt.Sprintf("<b>[%s]</b> Queue timeout — main directory was not freed in time.", escapeHTML(pp.inst.Name)),
+					ParseMode: models.ParseModeHTML,
+				})
+				for _, f := range pp.cleanupFiles {
+					os.Remove(f)
+				}
+				return
+			}
+		}
+	}()
 }
 
 // getActiveInstance returns the active instance for a user.
