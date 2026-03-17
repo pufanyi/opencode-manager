@@ -24,8 +24,9 @@ type WebConfig struct {
 }
 
 type TelegramConfig struct {
-	Token        string  `yaml:"token"`
-	AllowedUsers []int64 `yaml:"allowed_users"`
+	Token         string        `yaml:"token"`
+	AllowedUsers  []int64       `yaml:"allowed_users"`
+	BoardInterval time.Duration `yaml:"board_interval"`
 }
 
 type ProcessConfig struct {
@@ -54,6 +55,9 @@ type StorageConfig struct {
 
 func Load(path string) (*Config, error) {
 	cfg := &Config{
+		Telegram: TelegramConfig{
+			BoardInterval: 2 * time.Second,
+		},
 		Process: ProcessConfig{
 			OpencodeBinary:      "opencode",
 			ClaudeCodeBinary:    "claude",

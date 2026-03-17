@@ -18,7 +18,6 @@ import (
 const (
 	maxMessageLen   = 4096
 	fileFallbackLen = 12000
-	boardInterval   = 5 * time.Second
 )
 
 // toolStatus tracks a single tool invocation's display state.
@@ -80,22 +79,27 @@ type StreamManager struct {
 	nextID    int
 
 	// Status board
-	b            *bot.Bot
-	boardMu      sync.Mutex
-	boardMsgs    map[int64]int    // chatID -> board message ID
-	boardContent map[int64]string // chatID -> last sent content
-	boardRepos   map[int64]bool   // chatID -> needs reposition (new msg appeared)
-	boardStarted bool
+	b              *bot.Bot
+	boardMu        sync.Mutex
+	boardMsgs      map[int64]int    // chatID -> board message ID
+	boardContent   map[int64]string // chatID -> last sent content
+	boardRepos     map[int64]bool   // chatID -> needs reposition (new msg appeared)
+	boardStarted   bool
+	boardInterval  time.Duration
 }
 
-func NewStreamManager() *StreamManager {
+func NewStreamManager(boardInterval time.Duration) *StreamManager {
+	if boardInterval <= 0 {
+		boardInterval = 2 * time.Second
+	}
 	return &StreamManager{
-		streams:      make(map[string]*StreamContext),
-		taskMap:      make(map[int]*StreamContext),
-		semaphore:    make(chan struct{}, 25),
-		boardMsgs:    make(map[int64]int),
-		boardContent: make(map[int64]string),
-		boardRepos:   make(map[int64]bool),
+		streams:       make(map[string]*StreamContext),
+		taskMap:       make(map[int]*StreamContext),
+		semaphore:     make(chan struct{}, 25),
+		boardMsgs:     make(map[int64]int),
+		boardContent:  make(map[int64]string),
+		boardRepos:    make(map[int64]bool),
+		boardInterval: boardInterval,
 	}
 }
 
@@ -579,7 +583,7 @@ func (sc *StreamContext) sendAsFile(content string) {
 // ---------------------------------------------------------------------------
 
 func (sm *StreamManager) boardLoop() {
-	ticker := time.NewTicker(boardInterval)
+	ticker := time.NewTicker(sm.boardInterval)
 	defer ticker.Stop()
 	for range ticker.C {
 		sm.refreshBoard()

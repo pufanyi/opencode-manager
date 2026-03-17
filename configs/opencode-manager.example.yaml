@@ -1,6 +1,7 @@
 telegram:
   token: "123456:ABC-DEF..."           # Your Telegram bot token from @BotFather
   allowed_users: [12345678]            # Authorized Telegram user IDs
+  board_interval: 2s                   # Active Tasks board refresh interval
 
 process:
   opencode_binary: "opencode"          # Binary name or full path
