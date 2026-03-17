@@ -670,7 +670,7 @@ func buildBoardHTML(entries []boardEntry) string {
 	var sb strings.Builder
 	sb.WriteString("📋 <b>Active Tasks</b>\n")
 
-	for _, e := range entries {
+	for i, e := range entries {
 		title := strings.ToValidUTF8(e.sessionTitle, "\uFFFD")
 		if title == "" {
 			title = "(new)"
@@ -682,12 +682,19 @@ func buildBoardHTML(entries []boardEntry) string {
 
 		inst := strings.ToValidUTF8(e.instanceName, "\uFFFD")
 
-		sb.WriteString(fmt.Sprintf("\n<b>#%d</b> %s\n", e.taskID, escapeHTML(inst)))
-		sb.WriteString(fmt.Sprintf("  %s (%s)\n", escapeHTML(title), formatElapsed(e.elapsed)))
+		// Visual separator between tasks
+		if i > 0 {
+			sb.WriteString("┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n")
+		}
 
-		for i, t := range e.tools {
+		// Header: task ID, instance, elapsed — all on one bold line
+		sb.WriteString(fmt.Sprintf("\n<b>#%d  %s</b>  (%s)\n", e.taskID, escapeHTML(inst), formatElapsed(e.elapsed)))
+		// Session title in italics to distinguish from other elements
+		sb.WriteString(fmt.Sprintf("<i>  %s</i>\n", escapeHTML(title)))
+
+		for j, t := range e.tools {
 			prefix := "├"
-			if i == len(e.tools)-1 {
+			if j == len(e.tools)-1 {
 				prefix = "└"
 			}
 
