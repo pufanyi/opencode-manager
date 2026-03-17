@@ -491,24 +491,79 @@ func (a *textAccumulator) reset() {
 }
 
 // extractToolDetail extracts a human-readable detail string from tool input.
-// For Agent tools, this is the "description" field.
 func extractToolDetail(name string, tool *claudeTool, topInput map[string]interface{}) string {
-	if name != "Agent" {
+	input := topInput
+	if tool != nil && tool.Input != nil {
+		input = tool.Input
+	}
+	if input == nil {
 		return ""
 	}
-	// Try tool.Input (nested inside tool object)
-	if tool != nil && tool.Input != nil {
-		if desc, ok := tool.Input["description"].(string); ok && desc != "" {
+
+	switch name {
+	case "Agent":
+		if desc, ok := input["description"].(string); ok && desc != "" {
 			return desc
 		}
-	}
-	// Try top-level tool_input
-	if topInput != nil {
-		if desc, ok := topInput["description"].(string); ok && desc != "" {
+	case "Bash":
+		if cmd, ok := input["command"].(string); ok && cmd != "" {
+			if idx := strings.IndexByte(cmd, '\n'); idx >= 0 {
+				cmd = cmd[:idx]
+			}
+			return cmd
+		}
+		if desc, ok := input["description"].(string); ok && desc != "" {
 			return desc
 		}
+	case "Read":
+		if fp, ok := input["file_path"].(string); ok && fp != "" {
+			return shortenPath(fp)
+		}
+	case "Edit":
+		if fp, ok := input["file_path"].(string); ok && fp != "" {
+			return shortenPath(fp)
+		}
+	case "Write":
+		if fp, ok := input["file_path"].(string); ok && fp != "" {
+			return shortenPath(fp)
+		}
+	case "Grep":
+		if pat, ok := input["pattern"].(string); ok && pat != "" {
+			return pat
+		}
+	case "Glob":
+		if pat, ok := input["pattern"].(string); ok && pat != "" {
+			return pat
+		}
+	case "WebFetch":
+		if url, ok := input["url"].(string); ok && url != "" {
+			return url
+		}
+	case "WebSearch":
+		if q, ok := input["query"].(string); ok && q != "" {
+			return q
+		}
+	case "Skill":
+		if s, ok := input["skill"].(string); ok && s != "" {
+			return s
+		}
+	case "NotebookEdit":
+		if fp, ok := input["notebook_path"].(string); ok && fp != "" {
+			return shortenPath(fp)
+		}
+	case "TodoWrite":
+		return "updating tasks"
 	}
 	return ""
+}
+
+// shortenPath returns the last 2 path segments for compact display.
+func shortenPath(p string) string {
+	parts := strings.Split(p, "/")
+	if len(parts) <= 2 {
+		return p
+	}
+	return strings.Join(parts[len(parts)-2:], "/")
 }
 
 func parseClaudeEvent(line []byte, acc *textAccumulator) *StreamEvent {

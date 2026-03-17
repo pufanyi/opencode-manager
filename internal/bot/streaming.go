@@ -33,8 +33,7 @@ type boardEntry struct {
 	taskID       int
 	instanceName string
 	sessionTitle string
-	currentTool  string
-	toolDetail   string // Agent description for richer display
+	tools        []toolStatus // recent tools for display (completed + running)
 	elapsed      time.Duration
 }
 
@@ -534,20 +533,33 @@ func (sm *StreamManager) refreshBoard() {
 	for _, sc := range sm.streams {
 		sc.mu.Lock()
 		if !sc.done {
-			var tool, detail string
-			for j := len(sc.tools) - 1; j >= 0; j-- {
-				if sc.tools[j].State == "running" {
-					tool = sc.tools[j].Name
-					detail = sc.tools[j].Detail
-					break
+			// Collect recent tools: all running + last few completed
+			var running, completed []toolStatus
+			for _, t := range sc.tools {
+				if t.State == "running" {
+					running = append(running, t)
+				} else {
+					completed = append(completed, t)
 				}
 			}
+			// Keep last 2 completed + all running, max 6 total
+			const maxCompleted = 2
+			if len(completed) > maxCompleted {
+				completed = completed[len(completed)-maxCompleted:]
+			}
+			display := append(completed, running...)
+			if len(display) > 6 {
+				display = display[len(display)-6:]
+			}
+			if len(display) == 0 {
+				display = []toolStatus{{State: "running", Detail: "Thinking..."}}
+			}
+
 			chatEntries[sc.chatID] = append(chatEntries[sc.chatID], boardEntry{
 				taskID:       sc.taskID,
 				instanceName: sc.instanceName,
 				sessionTitle: sc.sessionTitle,
-				currentTool:  tool,
-				toolDetail:   detail,
+				tools:        display,
 				elapsed:      time.Since(sc.startedAt),
 			})
 		}
@@ -670,20 +682,52 @@ func buildBoardHTML(entries []boardEntry) string {
 
 		inst := strings.ToValidUTF8(e.instanceName, "\uFFFD")
 
-		status := "thinking"
-		if e.currentTool != "" {
-			if e.currentTool == "Agent" && e.toolDetail != "" {
-				status = strings.ToValidUTF8(e.toolDetail, "\uFFFD")
+		sb.WriteString(fmt.Sprintf("\n<b>#%d</b> %s\n", e.taskID, escapeHTML(inst)))
+		sb.WriteString(fmt.Sprintf("  %s (%s)\n", escapeHTML(title), formatElapsed(e.elapsed)))
+
+		for i, t := range e.tools {
+			prefix := "├"
+			if i == len(e.tools)-1 {
+				prefix = "└"
+			}
+
+			// "Thinking" state — no tool name
+			if t.Name == "" {
+				sb.WriteString(fmt.Sprintf("  %s 💭 %s\n", prefix, escapeHTML(t.Detail)))
+				continue
+			}
+
+			icon := toolStateIcon(t.State)
+			detail := strings.ToValidUTF8(t.Detail, "\uFFFD")
+			detailRunes := []rune(detail)
+			if len(detailRunes) > 40 {
+				detail = string(detailRunes[:40]) + ".."
+			}
+
+			name := escapeHTML(t.Name)
+			if detail != "" {
+				sb.WriteString(fmt.Sprintf("  %s %s %s: %s\n", prefix, icon, name, escapeHTML(detail)))
 			} else {
-				status = strings.ToValidUTF8(e.currentTool, "\uFFFD")
+				sb.WriteString(fmt.Sprintf("  %s %s %s\n", prefix, icon, name))
 			}
 		}
-
-		sb.WriteString(fmt.Sprintf("\n<b>#%d</b> %s\n", e.taskID, escapeHTML(inst)))
-		sb.WriteString(fmt.Sprintf("  %s | 🔄 %s (%s)\n", escapeHTML(title), escapeHTML(status), formatElapsed(e.elapsed)))
 	}
 
 	return sb.String()
+}
+
+// toolStateIcon returns the emoji for a tool state.
+func toolStateIcon(state string) string {
+	switch state {
+	case "running":
+		return "🔄"
+	case "completed":
+		return "✅"
+	case "error":
+		return "❌"
+	default:
+		return "🔧"
+	}
 }
 
 // boardKeyboard builds inline stop buttons for each active task.
