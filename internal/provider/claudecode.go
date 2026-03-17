@@ -2,6 +2,7 @@ package provider
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -113,11 +114,14 @@ func (p *ClaudeCodeProvider) Prompt(ctx context.Context, sessionID string, conte
 	cmd := exec.CommandContext(cmdCtx, p.binary,
 		"-p", content,
 		"--output-format", "stream-json",
+		"--verbose",
 		"--session-id", sessionID,
 		"--permission-mode", "bypassPermissions",
-		"--no-session-persistence",
 	)
 	cmd.Dir = p.dir
+
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 
 	p.mu.Lock()
 	p.activeCmd = cmd
@@ -170,8 +174,13 @@ func (p *ClaudeCodeProvider) Prompt(ctx context.Context, sessionID string, conte
 		p.mu.Unlock()
 
 		if err != nil && cmdCtx.Err() == nil {
+			errMsg := err.Error()
+			if stderr := stderrBuf.String(); stderr != "" {
+				errMsg = stderr
+				slog.Error("claude process failed", "error", err, "stderr", stderr)
+			}
 			select {
-			case ch <- StreamEvent{Type: "error", Error: err.Error()}:
+			case ch <- StreamEvent{Type: "error", Error: errMsg}:
 			default:
 			}
 		}
@@ -200,32 +209,44 @@ func (p *ClaudeCodeProvider) Abort(ctx context.Context, sessionID string) error 
 	return nil
 }
 
-// Claude Code stream-json event types
+// Claude Code stream-json event types.
+// Format: one JSON object per line.
+//
+// {"type":"system","subtype":"init","session_id":"...","tools":[...],...}
+// {"type":"assistant","message":{"content":[{"type":"text","text":"..."}],...},"session_id":"..."}
+// {"type":"tool_use","tool":{"name":"...","type":"..."},...}
+// {"type":"tool_result","tool":{"name":"..."},...}
+// {"type":"result","subtype":"success","result":"full text","session_id":"..."}
+// {"type":"result","subtype":"error","error":"..."}
+
 type claudeEvent struct {
-	Type    string          `json:"type"`
-	Subtype string          `json:"subtype,omitempty"`
-	Message *claudeMessage  `json:"message,omitempty"`
-	Delta   *claudeDelta    `json:"delta,omitempty"`
-	Result  json.RawMessage `json:"result,omitempty"`
+	Type    string `json:"type"`
+	Subtype string `json:"subtype,omitempty"`
+
+	// For "assistant" events
+	Message *claudeMessage `json:"message,omitempty"`
+
+	// For "result" events
+	Result  string `json:"result,omitempty"`
+	IsError bool   `json:"is_error,omitempty"`
+	Error   string `json:"error,omitempty"`
+
+	// For "tool_use" / "tool_result" events
+	Tool *claudeTool `json:"tool,omitempty"`
 }
 
 type claudeMessage struct {
-	Role    string        `json:"role"`
 	Content []claudeBlock `json:"content"`
 }
 
 type claudeBlock struct {
-	Type  string `json:"type"`
-	Text  string `json:"text,omitempty"`
-	Name  string `json:"name,omitempty"`
-	ID    string `json:"id,omitempty"`
-	Input any    `json:"input,omitempty"`
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+	Name string `json:"name,omitempty"`
 }
 
-type claudeDelta struct {
-	Type        string `json:"type"`
-	Text        string `json:"text,omitempty"`
-	PartialJSON string `json:"partial_json,omitempty"`
+type claudeTool struct {
+	Name string `json:"name,omitempty"`
 }
 
 func parseClaudeEvent(line []byte) *StreamEvent {
@@ -236,7 +257,6 @@ func parseClaudeEvent(line []byte) *StreamEvent {
 
 	switch evt.Type {
 	case "assistant":
-		// Full message snapshot — extract text content
 		if evt.Message != nil {
 			var text string
 			for _, block := range evt.Message.Content {
@@ -249,30 +269,37 @@ func parseClaudeEvent(line []byte) *StreamEvent {
 			}
 		}
 
-	case "content_block_delta":
-		if evt.Delta != nil {
-			if evt.Delta.Type == "text_delta" && evt.Delta.Text != "" {
-				return &StreamEvent{Type: "text", Text: evt.Delta.Text}
-			}
+	case "tool_use":
+		name := ""
+		if evt.Tool != nil {
+			name = evt.Tool.Name
+		}
+		if name != "" {
+			return &StreamEvent{Type: "tool_use", ToolName: name, ToolState: "running"}
 		}
 
-	case "content_block_start":
-		// Could be a tool use block
-		if evt.Message != nil {
-			for _, block := range evt.Message.Content {
-				if block.Type == "tool_use" && block.Name != "" {
-					return &StreamEvent{Type: "tool_use", ToolName: block.Name, ToolState: "running"}
-				}
-			}
+	case "tool_result":
+		name := ""
+		if evt.Tool != nil {
+			name = evt.Tool.Name
+		}
+		if name != "" {
+			return &StreamEvent{Type: "tool_use", ToolName: name, ToolState: "completed"}
 		}
 
 	case "result":
-		done := &StreamEvent{Type: "done", Done: true}
-		if evt.Subtype == "error" {
-			done.Type = "error"
-			done.Error = "prompt failed"
+		if evt.Subtype == "error" || evt.IsError {
+			errMsg := evt.Error
+			if errMsg == "" {
+				errMsg = "prompt failed"
+			}
+			return &StreamEvent{Type: "error", Error: errMsg}
 		}
-		return done
+		// Success — send final text from result field
+		if evt.Result != "" {
+			return &StreamEvent{Type: "text", Text: evt.Result, Done: true}
+		}
+		return &StreamEvent{Type: "done", Done: true}
 	}
 
 	return nil
