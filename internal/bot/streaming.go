@@ -835,20 +835,10 @@ func boardKeyboard(entries []boardEntry) *models.InlineKeyboardMarkup {
 	if len(entries) == 0 {
 		return nil
 	}
-	// Show instance name in buttons when few tasks, otherwise use task ID
-	useNames := len(entries) <= 3
 	var row []models.InlineKeyboardButton
 	var rows [][]models.InlineKeyboardButton
 	for _, e := range entries {
-		label := fmt.Sprintf("🛑 #%d", e.taskID)
-		if useNames {
-			name := e.instanceName
-			nameRunes := []rune(name)
-			if len(nameRunes) > 12 {
-				name = string(nameRunes[:12]) + ".."
-			}
-			label = fmt.Sprintf("🛑 %s", name)
-		}
+		label := fmt.Sprintf("Stop #%d", e.taskID)
 		row = append(row, models.InlineKeyboardButton{
 			Text:         label,
 			CallbackData: fmt.Sprintf("stoptask:%d", e.taskID),
