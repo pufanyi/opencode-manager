@@ -17,3 +17,7 @@ projects:                               # Pre-registered projects (optional)
 
 storage:
   database: "./data/opencode-manager.db"
+
+web:
+  enabled: true                       # Enable web dashboard
+  addr: ":8080"                       # Listen address

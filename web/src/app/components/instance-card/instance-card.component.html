@@ -1,0 +1,30 @@
+<div class="card" (click)="selectInstance.emit(instance)">
+  <div class="card-header">
+    <div class="card-title-row">
+      <span class="status-dot" [style.background]="statusColor"></span>
+      <span class="card-name">{{ instance.name }}</span>
+      <span class="provider-badge" [class.cc]="instance.provider_type === 'claudecode'">
+        {{ providerBadge }}
+      </span>
+    </div>
+    <span class="status-label">{{ instance.status }}</span>
+  </div>
+
+  <div class="card-body">
+    <div class="directory" [title]="instance.directory">{{ instance.directory }}</div>
+    @if (instance.port) {
+      <div class="port">Port: {{ instance.port }}</div>
+    }
+  </div>
+
+  <div class="card-actions" (click)="$event.stopPropagation()">
+    @if (!isRunning) {
+      <button class="btn-success btn-sm" (click)="startInstance.emit(instance)">Start</button>
+    }
+    @if (isRunning) {
+      <button class="btn-warning btn-sm" (click)="stopInstance.emit(instance)">Stop</button>
+    }
+    <button class="btn-danger btn-sm" (click)="deleteInstance.emit(instance)">Delete</button>
+    <button class="btn-primary btn-sm" (click)="selectInstance.emit(instance)">Select</button>
+  </div>
+</div>

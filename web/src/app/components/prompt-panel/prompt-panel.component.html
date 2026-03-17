@@ -1,0 +1,48 @@
+@if (instance) {
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title">Prompt &mdash; {{ instance.name }}</span>
+      <div class="session-controls">
+        <select [(ngModel)]="selectedSessionId" (ngModelChange)="onSessionChange()">
+          @for (s of sessions; track s.ID) {
+            <option [value]="s.ID">{{ s.Title || s.ID }}</option>
+          }
+          @if (sessions.length === 0) {
+            <option value="" disabled>No sessions</option>
+          }
+        </select>
+        <button class="btn-ghost" (click)="createSession()">New Session</button>
+      </div>
+    </div>
+
+    <div class="response-container">
+      <pre #responseArea class="response-area">{{ responseText || 'Waiting for response...' }}</pre>
+    </div>
+
+    <div class="input-row">
+      <textarea
+        [(ngModel)]="promptText"
+        (keydown)="onKeyDown($event)"
+        placeholder="Enter your prompt... (Enter to send, Shift+Enter for newline)"
+        rows="2"
+        [disabled]="!selectedSessionId"
+      ></textarea>
+      <div class="input-actions">
+        <button
+          class="btn-primary"
+          (click)="sendPrompt()"
+          [disabled]="!selectedSessionId || !promptText.trim() || streaming"
+        >
+          Send
+        </button>
+        @if (streaming) {
+          <button class="btn-danger" (click)="abort()">Abort</button>
+        }
+      </div>
+    </div>
+  </div>
+} @else {
+  <div class="panel empty-state">
+    <p>Select an instance to open the prompt panel.</p>
+  </div>
+}

@@ -3,3 +3,7 @@
 /data/
 *.db
 opencode-manager.yaml
+node_modules/
+web/node_modules/
+web/.angular/
+internal/web/dist/

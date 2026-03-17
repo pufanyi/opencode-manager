@@ -29,7 +29,9 @@ func (s *Store) migrate() error {
 			id TEXT PRIMARY KEY,
 			instance_id TEXT NOT NULL,
 			title TEXT DEFAULT '',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			message_count INTEGER NOT NULL DEFAULT 0
 		)`,
 	}
 

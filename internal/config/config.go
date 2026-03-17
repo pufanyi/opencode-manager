@@ -15,6 +15,12 @@ type Config struct {
 	Process  ProcessConfig  `yaml:"process"`
 	Projects []ProjectConfig `yaml:"projects"`
 	Storage  StorageConfig  `yaml:"storage"`
+	Web      WebConfig      `yaml:"web"`
+}
+
+type WebConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Addr    string `yaml:"addr"`
 }
 
 type TelegramConfig struct {

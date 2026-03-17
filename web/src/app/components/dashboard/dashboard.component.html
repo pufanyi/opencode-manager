@@ -1,0 +1,53 @@
+<div class="dashboard">
+  <header class="header">
+    <h1 class="logo">OpenCode Manager</h1>
+    <button class="btn-primary" (click)="toggleNewForm()">
+      {{ showNewForm ? 'Cancel' : 'New Instance' }}
+    </button>
+  </header>
+
+  @if (showNewForm) {
+    <div class="new-instance-form">
+      <div class="form-row">
+        <input
+          type="text"
+          [(ngModel)]="newName"
+          placeholder="Instance name"
+        />
+        <input
+          type="text"
+          [(ngModel)]="newDirectory"
+          placeholder="Working directory (e.g. /home/user/project)"
+        />
+        <select [(ngModel)]="newProvider">
+          <option value="claudecode">Claude Code</option>
+          <option value="opencode">OpenCode</option>
+        </select>
+        <button class="btn-success" (click)="createInstance()" [disabled]="!newName.trim() || !newDirectory.trim()">
+          Create
+        </button>
+      </div>
+    </div>
+  }
+
+  <section class="instance-grid">
+    @for (inst of instances; track inst.id) {
+      <app-instance-card
+        [instance]="inst"
+        (selectInstance)="onSelect($event)"
+        (startInstance)="onStart($event)"
+        (stopInstance)="onStop($event)"
+        (deleteInstance)="onDelete($event)"
+      />
+    }
+    @if (instances.length === 0) {
+      <div class="empty-grid">
+        <p>No instances yet. Click "New Instance" to create one.</p>
+      </div>
+    }
+  </section>
+
+  <section class="prompt-section">
+    <app-prompt-panel [instance]="selectedInstance" />
+  </section>
+</div>

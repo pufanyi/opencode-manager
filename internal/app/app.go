@@ -9,6 +9,7 @@ import (
 	"github.com/pufanyi/opencode-manager/internal/process"
 	"github.com/pufanyi/opencode-manager/internal/provider"
 	"github.com/pufanyi/opencode-manager/internal/store"
+	"github.com/pufanyi/opencode-manager/internal/web"
 )
 
 type App struct {
@@ -16,6 +17,7 @@ type App struct {
 	store   *store.Store
 	procMgr *process.Manager
 	bot     *bot.Bot
+	web     *web.Server
 }
 
 func New(cfg *config.Config) (*App, error) {
@@ -45,12 +47,23 @@ func New(cfg *config.Config) (*App, error) {
 		tgBot.NotifyCrash(inst.Name, err)
 	})
 
-	return &App{
+	app := &App{
 		cfg:     cfg,
 		store:   st,
 		procMgr: procMgr,
 		bot:     tgBot,
-	}, nil
+	}
+
+	// Web dashboard
+	if cfg.Web.Enabled {
+		addr := cfg.Web.Addr
+		if addr == "" {
+			addr = ":8080"
+		}
+		app.web = web.NewServer(addr, procMgr, st)
+	}
+
+	return app, nil
 }
 
 func (a *App) Start(ctx context.Context) error {
@@ -85,6 +98,15 @@ func (a *App) Start(ctx context.Context) error {
 	}
 
 	a.procMgr.StartHealthChecks()
+
+	// Start web dashboard
+	if a.web != nil {
+		if err := a.web.Start(ctx); err != nil {
+			slog.Error("failed to start web dashboard", "error", err)
+		}
+	}
+
+	// Start bot (blocking)
 	a.bot.Start(ctx)
 
 	return nil
@@ -93,6 +115,9 @@ func (a *App) Start(ctx context.Context) error {
 func (a *App) Shutdown() {
 	slog.Info("shutting down")
 	a.bot.Stop()
+	if a.web != nil {
+		a.web.Stop()
+	}
 	a.procMgr.Shutdown()
 	a.store.Close()
 }
