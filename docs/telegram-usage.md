@@ -8,56 +8,70 @@
    ```
    /new myproject /path/to/your/project
    ```
-4. Send any text message — it goes straight to OpenCode as a prompt
+4. Send any text message — it goes straight to Claude Code as a prompt
 
 ## Concepts
 
 ### Instance
 
-An instance is a running `opencode serve` process tied to a specific project directory. Each instance has:
+An instance is a managed AI coding process tied to a specific project directory. There are two types:
+
+- **Claude Code** (default) — Uses the `claude` CLI. No persistent server; spawns per prompt.
+- **OpenCode** — Uses `opencode serve`. Runs as a persistent HTTP server with its own port and auth credentials.
+
+Each instance has:
 
 - A unique name (e.g., `backend`, `frontend`)
-- Its own port and auth credentials
+- A provider type (CC = Claude Code, OC = OpenCode)
 - Independent sessions and conversation history
 
 ### Session
 
-Each instance can have multiple sessions (conversations). A session maintains its own message history within OpenCode. You can:
+Each instance can have multiple sessions (conversations). A session maintains its own message history. You can:
 
 - Create new sessions: `/session new`
 - Switch between sessions: `/sessions` then tap one
 - Prompts go to your currently active session
 
+Sessions are auto-created when you send your first prompt. The first message is used as the session title.
+
 ### Active Context
 
-Each Telegram user has an **active instance** and **active session**. All prompts and commands operate on this context. The active context is shown in every response header:
-
-```
-[instance-name]
-```
+Each Telegram user has an **active instance** and **active session**. All prompts and commands operate on this context. Use `/status` to see your current context.
 
 ## Commands
 
 ### `/new <name> <path>`
 
-Create and start a new OpenCode instance.
+Create and start a new **Claude Code** instance.
 
 ```
 /new backend /home/user/projects/backend-api
 ```
 
+- Starts a Claude Code instance in the given directory
+- Automatically switches you to the new instance
+- A session is auto-created when you send your first prompt
+
+### `/newopencode <name> <path>`
+
+Create and start a new **OpenCode** instance.
+
+```
+/newopencode frontend /home/user/projects/frontend
+```
+
 - Allocates a port from the configured range
 - Starts `opencode serve` in the given directory
-- Automatically switches you to the new instance
 - Creates an SSE listener for real-time streaming
 
 ### `/list`
 
-Shows all instances with status indicators:
+Shows all instances with status indicators and provider type:
 
-- 🟢 Running
-- 🟡 Starting
-- 🔴 Stopped / Failed
+- 🟢 [CC] backend — running
+- 🟡 [OC] frontend — starting
+- 🔴 [CC] legacy — stopped
 
 Tap an instance in the inline keyboard to switch to it.
 
@@ -87,7 +101,7 @@ Restart a stopped instance.
 /start_inst backend
 ```
 
-A new port is allocated (the old one was released on stop).
+For OpenCode instances, a new port is allocated (the old one was released on stop).
 
 ### `/status`
 
@@ -95,10 +109,10 @@ Shows your current context:
 
 ```
 Active Instance: backend
+Provider: Claude Code
 Status: running
 Directory: /home/user/projects/backend-api
-Port: 14096
-Session: abc123
+Session: fix authentication bug (5 msgs)
 ```
 
 ### `/session new`
@@ -111,11 +125,18 @@ Create a new session in the active instance.
 
 ### `/session`
 
-Show info about your current session.
+Show info about your current session, including title, message count, and last activity time.
 
 ### `/sessions`
 
-List all sessions in the active instance. Tap one to switch to it.
+List all sessions in the active instance. Shows:
+
+- Session title (auto-titled from first prompt)
+- Message count
+- Last activity time
+- Active session indicator (▶)
+
+Tap a session to switch to it. Limited to 20 sessions in the list.
 
 ### `/abort`
 
@@ -131,15 +152,21 @@ Any text message that isn't a command is sent as a prompt to your active instanc
 
 **What happens:**
 
-1. A placeholder message appears: *"Thinking..."*
-2. The prompt is sent to OpenCode via HTTP API
-3. SSE events stream back as OpenCode processes the request
-4. The placeholder is progressively edited with the response
+1. A placeholder message appears: `[instance-name] Thinking...`
+2. The prompt is sent to the provider (Claude Code or OpenCode)
+3. Streaming events arrive as the AI processes the request
+4. The placeholder is progressively edited with the response (converted to Telegram HTML)
 5. Tool invocations appear with status icons:
    - ⏳ Running
    - ✅ Completed
    - ❌ Error
 6. When done, action buttons appear: **[Abort]** and **[New Session]**
+
+### Sending Photos
+
+You can send photos to Claude Code instances. The image is downloaded and passed as a file path in the prompt. Include a caption to provide context, or the default prompt "Please analyze this image" is used.
+
+Photos are stored temporarily and cleaned up after the prompt completes.
 
 ### Long Responses
 
@@ -148,7 +175,7 @@ Any text message that isn't a command is sent as a prompt to your active instanc
 
 ### Rate Limiting
 
-Updates are batched every 1.5 seconds to stay within Telegram's API limits. You won't see every character, but the response builds up progressively.
+Updates are batched every 5 seconds (2 seconds for drafts in private chats) to stay within Telegram's API limits. You won't see every character, but the response builds up progressively.
 
 ## Inline Keyboard Actions
 
@@ -161,7 +188,7 @@ Many commands produce inline keyboards. Available actions:
 | **Start** | Start a stopped instance |
 | **Delete** | Remove instance permanently |
 | **Switch** | Switch active context |
-| Session ID/Title | Switch to that session |
+| Session Title | Switch to that session |
 | **Abort** | Abort the running prompt |
 | **New Session** | Create a fresh session |
 
@@ -170,5 +197,7 @@ Many commands produce inline keyboards. Available actions:
 - **Quick start**: `/new proj /path` → immediately type your prompt
 - **Multiple projects**: Use `/list` and tap to switch between instances rapidly
 - **Fresh context**: Tap "New Session" after finishing a topic to start clean
-- **Check status**: `/status` shows what instance and session you're talking to
+- **Check status**: `/status` shows what instance, provider, and session you're talking to
 - **Emergency stop**: `/abort` if a prompt is running too long
+- **Visual analysis**: Send a photo with a caption to have Claude Code analyze it
+- **Provider choice**: Use `/new` for Claude Code (default, recommended), `/newopencode` for OpenCode

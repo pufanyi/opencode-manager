@@ -8,13 +8,21 @@ cd opencode-manager
 make build
 ```
 
-The binary is at `./bin/opencode-manager`.
+This builds the Angular frontend first (`pnpm ng build`), then compiles the Go binary with the frontend embedded. The binary is at `./bin/opencode-manager`.
+
+### Build Prerequisites
+
+- Go 1.24+
+- Node.js 22+ and pnpm (for the web dashboard frontend)
 
 ### Cross-compilation
 
-Since the project uses pure-Go SQLite (no CGo), cross-compilation works out of the box:
+Since the project uses pure-Go SQLite (no CGo), cross-compilation works out of the box. Build the frontend first, then cross-compile:
 
 ```bash
+# Build frontend (only needed once)
+make web
+
 # Linux ARM64 (e.g., Raspberry Pi, ARM servers)
 GOOS=linux GOARCH=arm64 go build -o bin/opencode-manager-linux-arm64 ./cmd/opencode-manager
 
@@ -30,7 +38,10 @@ Copy the binary to your server:
 sudo cp bin/opencode-manager /usr/local/bin/
 ```
 
-Make sure `opencode` is also installed and in `$PATH`, or set the full path in the config.
+Make sure your provider binaries are installed:
+
+- **Claude Code**: `claude` must be in `$PATH` (or set `claudecode_binary` in config)
+- **OpenCode**: `opencode` must be in `$PATH` (or set `opencode_binary` in config)
 
 ## First-time Setup
 
@@ -38,7 +49,17 @@ Make sure `opencode` is also installed and in `$PATH`, or set the full path in t
 opencode-manager setup
 ```
 
-Follow the 6-step wizard. The generated config is written to `opencode-manager.yaml` by default.
+Follow the 7-step wizard:
+
+1. Telegram bot token
+2. Allowed Telegram user IDs
+3. OpenCode binary path
+4. Claude Code binary path
+5. Port range (for OpenCode instances)
+6. Database path
+7. Pre-register projects (optional, with provider type selection)
+
+The generated config is written to `opencode-manager.yaml` with `0600` permissions.
 
 ## Running as a systemd Service
 
@@ -81,7 +102,8 @@ journalctl -u opencode-manager -f
 The service needs write access to:
 
 - The SQLite database directory (default: `./data/`)
-- Any project directories where OpenCode will write files
+- Any project directories where the AI coding tools will write files
+- `/tmp/opencode-manager/` (for temporary image downloads from Telegram)
 
 Update `ReadWritePaths` accordingly.
 
@@ -90,18 +112,27 @@ Update `ReadWritePaths` accordingly.
 Create a `Dockerfile`:
 
 ```dockerfile
+FROM node:22-alpine AS frontend
+WORKDIR /web
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN corepack enable && pnpm install --frozen-lockfile
+COPY web/ .
+RUN pnpm ng build --output-path /dist
+
 FROM golang:1.24-alpine AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+COPY --from=frontend /dist ./internal/web/dist
 RUN go build -o /opencode-manager ./cmd/opencode-manager
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /opencode-manager /usr/local/bin/
 
-# Install opencode (adjust for your setup)
+# Install claude and/or opencode (adjust for your setup)
+# COPY claude /usr/local/bin/
 # COPY opencode /usr/local/bin/
 
 ENTRYPOINT ["opencode-manager"]
@@ -118,7 +149,7 @@ docker run -d \
   opencode-manager
 ```
 
-Note: The OpenCode binary must also be available inside the container.
+Note: The provider binaries (`claude`, `opencode`) must also be available inside the container.
 
 ## Running with tmux / screen
 
@@ -136,8 +167,7 @@ tmux attach -t ocm
 The only stateful file is the SQLite database. Back it up periodically:
 
 ```bash
-# Safe backup (uses SQLite's backup API via .backup command isn't available,
-# but WAL mode makes file copy safe when no writes are in progress)
+# Safe backup (WAL mode makes file copy safe when no writes are in progress)
 cp data/opencode-manager.db data/opencode-manager.db.bak
 ```
 
@@ -157,11 +187,17 @@ sqlite3 data/opencode-manager.db .dump > backup.sql
 
 ### Instance won't start
 
-- Verify the `opencode` binary works: `opencode serve --help`
+- Verify the provider binary works: `claude --version` or `opencode serve --help`
 - Check the project directory exists and is accessible
-- Look for port conflicts: `ss -tlnp | grep 14096`
+- Look for port conflicts (OpenCode only): `ss -tlnp | grep 14096`
 
-### SSE connection drops
+### Claude Code instance errors
+
+- Check that `claude` is properly authenticated (run `claude` manually first)
+- Ensure the project directory has a valid git repo or codebase
+- Check stderr output in the manager logs
+
+### SSE connection drops (OpenCode)
 
 The SSE subscriber auto-reconnects after 2 seconds. Persistent drops may indicate:
 
@@ -174,3 +210,9 @@ The database uses WAL mode which supports concurrent reads. If you see lock erro
 
 - Ensure only one manager instance is running
 - Check for stale lock files: `ls data/opencode-manager.db*`
+
+### Web dashboard not loading
+
+- Ensure `web.enabled: true` is set in the config
+- Check the listen address (default `:8080`) isn't in use: `ss -tlnp | grep 8080`
+- The frontend is embedded in the binary at build time — if you built without `make web` first, the dashboard will be empty

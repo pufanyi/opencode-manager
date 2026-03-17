@@ -4,6 +4,7 @@ telegram:
 
 process:
   opencode_binary: "opencode"          # Binary name or full path
+  claudecode_binary: "claude"          # Binary name or full path
   port_range:
     start: 14096
     end: 14196
@@ -13,11 +14,12 @@ process:
 projects:                               # Pre-registered projects (optional)
   # - name: "myproject"
   #   directory: "/home/user/myproject"
+  #   provider: "claudecode"            # "claudecode" (default) or "opencode"
   #   auto_start: true
 
 storage:
   database: "./data/opencode-manager.db"
 
 web:
-  enabled: true                       # Enable web dashboard
-  addr: ":8080"                       # Listen address
+  enabled: true                        # Enable web dashboard
+  addr: ":8080"                        # Listen address
