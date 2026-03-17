@@ -770,7 +770,7 @@ func buildBoardHTML(entries []boardEntry) string {
 		sb.WriteString("\n<blockquote>")
 
 		// Task header: ID, instance name, elapsed time
-		sb.WriteString(fmt.Sprintf("<b>#%d  %s</b>  ·  %s\n", e.taskID, escapeHTML(inst), formatElapsed(e.elapsed)))
+		sb.WriteString(fmt.Sprintf("<b>#%d  %s</b>  ·  ⏱ %s\n", e.taskID, escapeHTML(inst), formatElapsed(e.elapsed)))
 
 		// Location + session title
 		if e.location != "" {
