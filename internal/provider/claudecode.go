@@ -292,7 +292,8 @@ type claudeEvent struct {
 	Error   string `json:"error,omitempty"`
 
 	// For "tool_use" / "tool_result" events
-	Tool *claudeTool `json:"tool,omitempty"`
+	Tool      *claudeTool            `json:"tool,omitempty"`
+	ToolInput map[string]interface{} `json:"tool_input,omitempty"`
 }
 
 type claudeStreamEvent struct {
@@ -317,7 +318,8 @@ type claudeBlock struct {
 }
 
 type claudeTool struct {
-	Name string `json:"name,omitempty"`
+	Name  string                 `json:"name,omitempty"`
+	Input map[string]interface{} `json:"input,omitempty"`
 }
 
 // textAccumulator tracks the full text for streaming display.
@@ -334,6 +336,27 @@ func (a *textAccumulator) append(delta string) string {
 
 func (a *textAccumulator) reset() {
 	a.buf.Reset()
+}
+
+// extractToolDetail extracts a human-readable detail string from tool input.
+// For Agent tools, this is the "description" field.
+func extractToolDetail(name string, tool *claudeTool, topInput map[string]interface{}) string {
+	if name != "Agent" {
+		return ""
+	}
+	// Try tool.Input (nested inside tool object)
+	if tool != nil && tool.Input != nil {
+		if desc, ok := tool.Input["description"].(string); ok && desc != "" {
+			return desc
+		}
+	}
+	// Try top-level tool_input
+	if topInput != nil {
+		if desc, ok := topInput["description"].(string); ok && desc != "" {
+			return desc
+		}
+	}
+	return ""
 }
 
 func parseClaudeEvent(line []byte, acc *textAccumulator) *StreamEvent {
@@ -381,7 +404,8 @@ func parseClaudeEvent(line []byte, acc *textAccumulator) *StreamEvent {
 			name = evt.Tool.Name
 		}
 		if name != "" {
-			return &StreamEvent{Type: "tool_use", ToolName: name, ToolState: "running"}
+			detail := extractToolDetail(name, evt.Tool, evt.ToolInput)
+			return &StreamEvent{Type: "tool_use", ToolName: name, ToolState: "running", ToolDetail: detail}
 		}
 
 	case "tool_result":

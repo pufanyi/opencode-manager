@@ -22,12 +22,13 @@ type Session struct {
 // StreamEvent is a normalized streaming event sent to the bot layer.
 type StreamEvent struct {
 	// Type: "text", "tool_use", "done", "error"
-	Type      string
-	Text      string // Accumulated text so far (for "text" events)
-	ToolName  string // For tool_use
-	ToolState string // "running", "completed", "error"
-	Done      bool   // True when response is fully complete
-	Error     string // Non-empty on error events
+	Type       string
+	Text       string // Accumulated text so far (for "text" events)
+	ToolName   string // For tool_use
+	ToolState  string // "running", "completed", "error"
+	ToolDetail string // Short description (e.g., Agent description)
+	Done       bool   // True when response is fully complete
+	Error      string // Non-empty on error events
 }
 
 // Provider is the abstraction that bot handlers talk to.

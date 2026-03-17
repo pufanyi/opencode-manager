@@ -23,8 +23,9 @@ const (
 
 // toolStatus tracks a single tool invocation's display state.
 type toolStatus struct {
-	Name  string
-	State string // "running", "completed", "error"
+	Name   string
+	State  string // "running", "completed", "error"
+	Detail string // Short description (e.g., Agent task description)
 }
 
 // StreamContext manages streaming provider events to a Telegram message.
@@ -137,7 +138,7 @@ func (sc *StreamContext) consumeStream(ctx context.Context, ch <-chan provider.S
 				sc.textContent = evt.Text
 				sc.dirty = true
 			case "tool_use":
-				sc.updateTool(evt.ToolName, evt.ToolState)
+				sc.updateTool(evt.ToolName, evt.ToolState, evt.ToolDetail)
 				sc.dirty = true
 			case "done":
 				sc.done = true
@@ -152,15 +153,18 @@ func (sc *StreamContext) consumeStream(ctx context.Context, ch <-chan provider.S
 	}
 }
 
-// updateTool adds or updates a tool's status.
-func (sc *StreamContext) updateTool(name, state string) {
+// updateTool adds or updates a tool's status and detail.
+func (sc *StreamContext) updateTool(name, state, detail string) {
 	for i := range sc.tools {
 		if sc.tools[i].Name == name && sc.tools[i].State == "running" {
 			sc.tools[i].State = state
+			if detail != "" {
+				sc.tools[i].Detail = detail
+			}
 			return
 		}
 	}
-	sc.tools = append(sc.tools, toolStatus{Name: name, State: state})
+	sc.tools = append(sc.tools, toolStatus{Name: name, State: state, Detail: detail})
 }
 
 func (sc *StreamContext) flushLoop(ctx context.Context, semaphore chan struct{}) {
@@ -223,13 +227,14 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 	done := sc.done
 	sc.mu.Unlock()
 
-	if text == "" && len(tools) == 0 {
-		return
-	}
-
 	// --- Build HTML content ---
 	header := fmt.Sprintf("<b>[%s]</b>", escapeHTML(sc.instanceName))
-	toolsHTML := formatToolsHTML(tools)
+
+	// Only show Active Tasks board during streaming (not in final message)
+	toolsHTML := ""
+	if !done {
+		toolsHTML = formatActiveTasksHTML(tools)
+	}
 
 	var renderedText string
 	if text != "" {
@@ -239,17 +244,25 @@ func (sc *StreamContext) flush(semaphore chan struct{}, final bool) {
 		}
 	}
 
-	// Assemble: header + tools (top) + text
+	// Skip if nothing to display and not done (keep "Thinking..." placeholder)
+	if toolsHTML == "" && renderedText == "" && !done {
+		return
+	}
+
+	// Assemble: header + active tasks (during streaming) + text
 	fullContent := header
 	if toolsHTML != "" {
-		fullContent += "\n" + toolsHTML
+		fullContent += "\n\n" + toolsHTML
 	}
 	if renderedText != "" {
 		fullContent += "\n\n" + renderedText
 	}
 
 	// --- Build plain-text fallback ---
-	toolsPlain := formatToolsPlain(tools)
+	toolsPlain := ""
+	if !done {
+		toolsPlain = formatActiveTasksPlain(tools)
+	}
 	var rawParts []string
 	if toolsPlain != "" {
 		rawParts = append(rawParts, toolsPlain)

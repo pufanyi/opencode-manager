@@ -319,11 +319,11 @@ func truncateHTML(html string, maxBytes int) string {
 	return balanceHTML(truncated)
 }
 
-// toolIcon returns the emoji for a tool state.
-func toolIcon(state string) string {
+// taskIcon returns the emoji for a task state in the Active Tasks board.
+func taskIcon(state string) string {
 	switch state {
 	case "running", "pending":
-		return "⏳"
+		return "🔄"
 	case "completed":
 		return "✅"
 	case "error":
@@ -333,53 +333,59 @@ func toolIcon(state string) string {
 	}
 }
 
-// formatToolsHTML renders tool statuses as a compact HTML line.
-// Deduplicates by name, showing each tool once with its latest state.
-func formatToolsHTML(tools []toolStatus) string {
-	if len(tools) == 0 {
-		return ""
-	}
-
-	seen := make(map[string]int) // name → index in deduped
-	var deduped []toolStatus
-
+// filterAgentTasks returns only Agent tool entries from the tools list.
+func filterAgentTasks(tools []toolStatus) []toolStatus {
+	var agents []toolStatus
 	for _, t := range tools {
-		if idx, exists := seen[t.Name]; exists {
-			deduped[idx] = t
-		} else {
-			seen[t.Name] = len(deduped)
-			deduped = append(deduped, t)
+		if t.Name == "Agent" {
+			agents = append(agents, t)
 		}
 	}
-
-	var parts []string
-	for _, t := range deduped {
-		parts = append(parts, fmt.Sprintf("%s <code>%s</code>", toolIcon(t.State), escapeHTML(t.Name)))
-	}
-	return strings.Join(parts, " · ")
+	return agents
 }
 
-// formatToolsPlain renders tool statuses as plain text (no HTML tags).
-func formatToolsPlain(tools []toolStatus) string {
-	if len(tools) == 0 {
+// formatActiveTasksHTML renders the Active Tasks board as Telegram HTML.
+// Only shows Agent tools with their descriptions in a blockquote.
+func formatActiveTasksHTML(tools []toolStatus) string {
+	agents := filterAgentTasks(tools)
+	if len(agents) == 0 {
 		return ""
 	}
 
-	seen := make(map[string]int)
-	var deduped []toolStatus
-
-	for _, t := range tools {
-		if idx, exists := seen[t.Name]; exists {
-			deduped[idx] = t
-		} else {
-			seen[t.Name] = len(deduped)
-			deduped = append(deduped, t)
+	var sb strings.Builder
+	sb.WriteString("<blockquote>📋 <b>Active Tasks</b>\n")
+	for _, t := range agents {
+		icon := taskIcon(t.State)
+		detail := t.Detail
+		if detail == "" {
+			detail = "Working..."
 		}
+		sb.WriteString(fmt.Sprintf("%s %s\n", icon, escapeHTML(detail)))
+	}
+	sb.WriteString("</blockquote>")
+	return sb.String()
+}
+
+// formatActiveTasksPlain renders the Active Tasks board as plain text.
+func formatActiveTasksPlain(tools []toolStatus) string {
+	agents := filterAgentTasks(tools)
+	if len(agents) == 0 {
+		return ""
 	}
 
-	var parts []string
-	for _, t := range deduped {
-		parts = append(parts, fmt.Sprintf("%s %s", toolIcon(t.State), t.Name))
+	var sb strings.Builder
+	sb.WriteString("📋 Active Tasks\n")
+	for i, t := range agents {
+		icon := taskIcon(t.State)
+		detail := t.Detail
+		if detail == "" {
+			detail = "Working..."
+		}
+		prefix := "├"
+		if i == len(agents)-1 {
+			prefix = "└"
+		}
+		sb.WriteString(fmt.Sprintf("%s %s %s\n", prefix, icon, detail))
 	}
-	return strings.Join(parts, " · ")
+	return sb.String()
 }
