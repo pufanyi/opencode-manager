@@ -71,16 +71,16 @@ type SSEEvent struct {
 
 // Event types from OpenCode SSE stream.
 const (
-	EventMessageUpdated  = "message.updated"
-	EventMessageCreated  = "message.created"
-	EventMessageDeleted  = "message.deleted"
-	EventSessionUpdated  = "session.updated"
-	EventSessionDeleted  = "session.deleted"
+	EventMessageUpdated = "message.updated"
+	EventMessageCreated = "message.created"
+	EventMessageDeleted = "message.deleted"
+	EventSessionUpdated = "session.updated"
+	EventSessionDeleted = "session.deleted"
 )
 
 // EventPayload wraps SSE event data.
 type EventPayload struct {
-	Type    string  `json:"type"`
+	Type    string   `json:"type"`
 	Session *Session `json:"session,omitempty"`
 	Message *Message `json:"message,omitempty"`
 }

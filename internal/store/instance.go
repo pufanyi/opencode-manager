@@ -92,7 +92,7 @@ func (s *Store) DeleteInstance(id string) error {
 
 func (s *Store) GetRunningInstances() ([]*Instance, error) {
 	rows, err := s.db.Query(
-		`SELECT `+instanceCols+` FROM instances WHERE status = 'running' OR auto_start = 1`,
+		`SELECT ` + instanceCols + ` FROM instances WHERE status = 'running' OR auto_start = 1`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("getting running instances: %w", err)

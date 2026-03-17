@@ -114,7 +114,8 @@ func runServe() {
 	slog.Info("starting opencode-manager", "config", cfgPath)
 
 	if err := application.Start(ctx); err != nil {
+		cancel()
+		application.Shutdown()
 		slog.Error("application error", "error", err)
-		os.Exit(1)
 	}
 }

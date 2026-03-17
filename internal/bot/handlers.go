@@ -356,7 +356,7 @@ func (h *Handlers) HandleSession(ctx context.Context, b *bot.Bot, update *models
 	if err != nil || cs == nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
-			Text:   fmt.Sprintf("Failed to get session: session not found"),
+			Text:   "Failed to get session: session not found",
 		})
 		return
 	}

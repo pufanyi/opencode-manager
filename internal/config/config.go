@@ -11,11 +11,11 @@ import (
 )
 
 type Config struct {
-	Telegram TelegramConfig `yaml:"telegram"`
-	Process  ProcessConfig  `yaml:"process"`
+	Telegram TelegramConfig  `yaml:"telegram"`
+	Process  ProcessConfig   `yaml:"process"`
 	Projects []ProjectConfig `yaml:"projects"`
-	Storage  StorageConfig  `yaml:"storage"`
-	Web      WebConfig      `yaml:"web"`
+	Storage  StorageConfig   `yaml:"storage"`
+	Web      WebConfig       `yaml:"web"`
 }
 
 type WebConfig struct {

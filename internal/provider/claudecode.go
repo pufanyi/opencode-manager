@@ -24,9 +24,9 @@ type ClaudeCodeProvider struct {
 	store  *store.Store
 	instID string // instance ID for session tracking
 
-	mu        sync.Mutex
-	activeCmd *exec.Cmd
-	activeCancel context.CancelFunc
+	mu            sync.Mutex
+	activeCmd     *exec.Cmd
+	activeCancel  context.CancelFunc
 	activeSession string
 }
 
@@ -266,9 +266,9 @@ type claudeEvent struct {
 }
 
 type claudeStreamEvent struct {
-	Type         string            `json:"type"`
-	Delta        *claudeDelta      `json:"delta,omitempty"`
-	ContentBlock *claudeBlock      `json:"content_block,omitempty"`
+	Type         string       `json:"type"`
+	Delta        *claudeDelta `json:"delta,omitempty"`
+	ContentBlock *claudeBlock `json:"content_block,omitempty"`
 }
 
 type claudeDelta struct {

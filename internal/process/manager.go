@@ -17,15 +17,15 @@ import (
 type CrashCallback func(inst *Instance, err error)
 
 type Manager struct {
-	mu              sync.RWMutex
-	instances       map[string]*Instance // keyed by ID
-	opencodeBinary  string
+	mu               sync.RWMutex
+	instances        map[string]*Instance // keyed by ID
+	opencodeBinary   string
 	claudeCodeBinary string
-	portPool        *PortPool
-	store           *store.Store
-	healthInterval  time.Duration
-	maxRestarts     int
-	onCrash         CrashCallback
+	portPool         *PortPool
+	store            *store.Store
+	healthInterval   time.Duration
+	maxRestarts      int
+	onCrash          CrashCallback
 
 	ctx    context.Context
 	cancel context.CancelFunc

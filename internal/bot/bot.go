@@ -105,6 +105,11 @@ func (b *Bot) Start(ctx context.Context) {
 		slog.Warn("failed to set bot commands", "error", err)
 	}
 
+	// Notify all allowed users that the bot is online
+	for _, userID := range b.cfg.AllowedUsers {
+		b.SendMessage(ctx, userID, "OpenCode Manager is online. Send /help for commands.")
+	}
+
 	b.bot.Start(ctx)
 }
 
