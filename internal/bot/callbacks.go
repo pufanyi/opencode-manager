@@ -10,6 +10,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/pufanyi/opencode-manager/internal/process"
+	"github.com/pufanyi/opencode-manager/internal/provider"
 )
 
 func (h *Handlers) HandleCallback(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -49,6 +50,8 @@ func (h *Handlers) HandleCallback(ctx context.Context, b *bot.Bot, update *model
 		h.callbackNewSession(ctx, b, chatID, userID)
 	case "delsession":
 		h.callbackDeleteSession(ctx, b, chatID, userID, param)
+	case "wt":
+		h.callbackWorktreeChoice(ctx, b, chatID, userID, param)
 	case "stoptask":
 		taskID, _ := strconv.Atoi(param)
 		h.callbackStopTask(ctx, b, chatID, taskID)
@@ -249,7 +252,12 @@ func (h *Handlers) callbackNewSession(ctx context.Context, b *bot.Bot, chatID in
 		return
 	}
 
-	session, err := inst.Provider.CreateSession(ctx)
+	if inst.Provider.SupportsWorktree() {
+		h.showWorktreeChoice(ctx, b, inst, userID, chatID, 0, "", "", nil)
+		return
+	}
+
+	session, err := inst.Provider.CreateSession(ctx, nil)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to create session: %s", err)})
 		return
@@ -262,4 +270,52 @@ func (h *Handlers) callbackNewSession(ctx context.Context, b *bot.Bot, chatID in
 		Text:      fmt.Sprintf("<b>[%s]</b> New session: <code>%s</code>", escapeHTML(inst.Name), session.ID),
 		ParseMode: models.ParseModeHTML,
 	})
+}
+
+func (h *Handlers) callbackWorktreeChoice(ctx context.Context, b *bot.Bot, chatID int64, userID int64, mode string) {
+	h.pendingMu.Lock()
+	pp, ok := h.pendingPrompts[userID]
+	if ok {
+		delete(h.pendingPrompts, userID)
+	}
+	h.pendingMu.Unlock()
+
+	if !ok || pp == nil {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   "No pending task found. Please send your message again.",
+		})
+		return
+	}
+
+	// Delete the choice message
+	if pp.choiceMsgID != 0 {
+		_, _ = b.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: chatID, MessageID: pp.choiceMsgID})
+	}
+
+	useWorktree := mode == "worktree"
+
+	if pp.text != "" {
+		// Prompt pending — create session and run prompt
+		h.createSessionAndPrompt(ctx, b, pp.inst, pp.userID, pp.chatID, pp.replyMsgID, pp.text, pp.titleHint, useWorktree, pp.cleanupFiles)
+	} else {
+		// Pure session creation (from /session new or newsession button)
+		opts := &provider.CreateSessionOpts{UseWorktree: useWorktree}
+		session, err := pp.inst.Provider.CreateSession(ctx, opts)
+		if err != nil {
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to create session: %s", err)})
+			return
+		}
+		_ = h.store.SetActiveSession(pp.userID, session.ID)
+
+		locLabel := "📂 main dir"
+		if useWorktree {
+			locLabel = "🌿 worktree"
+		}
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
+			Text:      fmt.Sprintf("<b>[%s]</b> New session (%s): <code>%s</code>", escapeHTML(pp.inst.Name), locLabel, session.ID),
+			ParseMode: models.ParseModeHTML,
+		})
+	}
 }

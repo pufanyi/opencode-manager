@@ -282,7 +282,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if action == "new" && r.Method == "POST" {
-		session, err := inst.Provider.CreateSession(r.Context())
+		session, err := inst.Provider.CreateSession(r.Context(), nil)
 		if err != nil {
 			writeError(w, 500, err.Error())
 			return

@@ -19,6 +19,11 @@ type Session struct {
 	Title string
 }
 
+// CreateSessionOpts controls how a new session is created.
+type CreateSessionOpts struct {
+	UseWorktree bool // Create an isolated git worktree for this session
+}
+
 // StreamEvent is a normalized streaming event sent to the bot layer.
 type StreamEvent struct {
 	// Type: "text", "tool_use", "done", "error"
@@ -58,9 +63,12 @@ type Provider interface {
 	SetPort(port int)
 
 	// --- Sessions ---
-	CreateSession(ctx context.Context) (*Session, error)
+	CreateSession(ctx context.Context, opts *CreateSessionOpts) (*Session, error)
 	GetSession(ctx context.Context, sessionID string) (*Session, error)
 	ListSessions(ctx context.Context) ([]Session, error)
+
+	// SupportsWorktree returns true if this provider can create isolated git worktrees.
+	SupportsWorktree() bool
 
 	// --- Prompting ---
 	// Prompt sends a prompt and returns a channel of StreamEvents.

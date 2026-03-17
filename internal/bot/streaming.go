@@ -33,7 +33,8 @@ type boardEntry struct {
 	taskID       int
 	instanceName string
 	sessionTitle string
-	tools        []toolStatus // recent tools for display (completed + running)
+	location     string        // e.g. "🌿 worktree" or "📂 main dir"
+	tools        []toolStatus  // recent tools for display (completed + running)
 	elapsed      time.Duration
 }
 
@@ -47,6 +48,7 @@ type StreamContext struct {
 	instanceName     string
 	sessionTitle     string
 	workDir          string // instance working directory for git merge-back
+	location         string // board display: "🌿 worktree" or "📂 main dir"
 	replyToMessageID int    // original user message ID for Telegram reply
 	startedAt        time.Time
 	manager          *StreamManager
@@ -119,6 +121,17 @@ func (sm *StreamManager) StartStream(b *bot.Bot, st *store.Store, chatID int64, 
 		cancel:           cancel,
 		promptCancel:     promptCancel,
 		abortFunc:        abortFunc,
+	}
+
+	// Look up session location for board display
+	if st != nil {
+		if cs, err := st.GetClaudeSession(sessionID); err == nil && cs != nil {
+			if cs.Branch != "" {
+				sc.location = "🌿 worktree"
+			} else {
+				sc.location = "📂 main dir"
+			}
+		}
 	}
 
 	sm.streams[sessionID] = sc
@@ -557,6 +570,7 @@ func (sm *StreamManager) refreshBoard() {
 				taskID:       sc.taskID,
 				instanceName: sc.instanceName,
 				sessionTitle: sc.sessionTitle,
+				location:     sc.location,
 				tools:        display,
 				elapsed:      time.Since(sc.startedAt),
 			})
@@ -687,8 +701,12 @@ func buildBoardHTML(entries []boardEntry) string {
 
 		// Header: task ID, instance, elapsed — all on one bold line
 		sb.WriteString(fmt.Sprintf("\n<b>#%d  %s</b>  (%s)\n", e.taskID, escapeHTML(inst), formatElapsed(e.elapsed)))
-		// Session title in italics to distinguish from other elements
-		sb.WriteString(fmt.Sprintf("<i>  %s</i>\n", escapeHTML(title)))
+		// Location + session title
+		if e.location != "" {
+			sb.WriteString(fmt.Sprintf("<i>  %s · %s</i>\n", e.location, escapeHTML(title)))
+		} else {
+			sb.WriteString(fmt.Sprintf("<i>  %s</i>\n", escapeHTML(title)))
+		}
 
 		for j, t := range e.tools {
 			prefix := "├"

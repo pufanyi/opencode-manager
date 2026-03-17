@@ -239,7 +239,9 @@ func (p *OpenCodeProvider) HealthCheck(ctx context.Context) error {
 	return client.Status()
 }
 
-func (p *OpenCodeProvider) CreateSession(ctx context.Context) (*Session, error) {
+func (p *OpenCodeProvider) SupportsWorktree() bool { return false }
+
+func (p *OpenCodeProvider) CreateSession(ctx context.Context, opts *CreateSessionOpts) (*Session, error) {
 	p.mu.Lock()
 	client := p.client
 	p.mu.Unlock()

@@ -223,11 +223,15 @@ func (p *ClaudeCodeProvider) syncWorktrees(excludeSessionID, baseBranch string) 
 	}
 }
 
-func (p *ClaudeCodeProvider) CreateSession(ctx context.Context) (*Session, error) {
+func (p *ClaudeCodeProvider) SupportsWorktree() bool {
+	return p.isGitRepo()
+}
+
+func (p *ClaudeCodeProvider) CreateSession(ctx context.Context, opts *CreateSessionOpts) (*Session, error) {
 	id := uuid.New().String()
 
 	var wtPath, branch string
-	if p.isGitRepo() {
+	if opts != nil && opts.UseWorktree && p.isGitRepo() {
 		var err error
 		wtPath, branch, err = p.createWorktree(id)
 		if err != nil {
