@@ -563,48 +563,32 @@ func (sm *StreamManager) refreshBoard() {
 			continue
 		}
 
-		msgID := sm.boardMsgs[chatID]
-		if msgID == 0 {
+		// Always delete the old board and send a new one so it stays at
+		// the bottom of the chat (the most recent message).
+		if oldID := sm.boardMsgs[chatID]; oldID != 0 {
 			sm.semaphore <- struct{}{}
-			msg, err := b.SendMessage(context.Background(), &bot.SendMessageParams{
-				ChatID:              chatID,
-				Text:                content,
-				ParseMode:           models.ParseModeHTML,
-				DisableNotification: true,
-				ReplyMarkup:         keyboard,
+			_, _ = b.DeleteMessage(context.Background(), &bot.DeleteMessageParams{
+				ChatID:    chatID,
+				MessageID: oldID,
 			})
 			<-sm.semaphore
-			if err != nil {
-				slog.Warn("failed to send board message", "error", err)
-				continue
-			}
-			sm.boardMsgs[chatID] = msg.ID
-		} else {
-			sm.semaphore <- struct{}{}
-			_, err := b.EditMessageText(context.Background(), &bot.EditMessageTextParams{
-				ChatID:      chatID,
-				MessageID:   msgID,
-				Text:        content,
-				ParseMode:   models.ParseModeHTML,
-				ReplyMarkup: keyboard,
-			})
-			<-sm.semaphore
-			if err != nil && !strings.Contains(err.Error(), "message is not modified") {
-				slog.Warn("board edit failed, recreating", "error", err)
-				sm.semaphore <- struct{}{}
-				msg, err := b.SendMessage(context.Background(), &bot.SendMessageParams{
-					ChatID:              chatID,
-					Text:                content,
-					ParseMode:           models.ParseModeHTML,
-					DisableNotification: true,
-					ReplyMarkup:         keyboard,
-				})
-				<-sm.semaphore
-				if err == nil {
-					sm.boardMsgs[chatID] = msg.ID
-				}
-			}
 		}
+
+		sm.semaphore <- struct{}{}
+		msg, err := b.SendMessage(context.Background(), &bot.SendMessageParams{
+			ChatID:              chatID,
+			Text:                content,
+			ParseMode:           models.ParseModeHTML,
+			DisableNotification: true,
+			ReplyMarkup:         keyboard,
+		})
+		<-sm.semaphore
+		if err != nil {
+			slog.Warn("failed to send board message", "error", err)
+			delete(sm.boardMsgs, chatID)
+			continue
+		}
+		sm.boardMsgs[chatID] = msg.ID
 		sm.boardContent[chatID] = content
 	}
 
