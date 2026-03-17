@@ -33,7 +33,8 @@ type boardEntry struct {
 	taskID       int
 	instanceName string
 	sessionTitle string
-	tools        []toolStatus // recent tools for display (completed + running)
+	location     string        // e.g. "🌿 worktree" or "📂 main dir"
+	tools        []toolStatus  // recent tools for display (completed + running)
 	elapsed      time.Duration
 }
 
@@ -47,6 +48,7 @@ type StreamContext struct {
 	instanceName     string
 	sessionTitle     string
 	workDir          string // instance working directory for git merge-back
+	location         string // board display: "🌿 worktree" or "📂 main dir"
 	replyToMessageID int    // original user message ID for Telegram reply
 	startedAt        time.Time
 	manager          *StreamManager
@@ -119,6 +121,17 @@ func (sm *StreamManager) StartStream(b *bot.Bot, st *store.Store, chatID int64, 
 		cancel:           cancel,
 		promptCancel:     promptCancel,
 		abortFunc:        abortFunc,
+	}
+
+	// Look up session location for board display
+	if st != nil {
+		if cs, err := st.GetClaudeSession(sessionID); err == nil && cs != nil {
+			if cs.Branch != "" {
+				sc.location = "🌿 worktree"
+			} else {
+				sc.location = "📂 main dir"
+			}
+		}
 	}
 
 	sm.streams[sessionID] = sc
@@ -559,6 +572,7 @@ func (sm *StreamManager) refreshBoard() {
 				taskID:       sc.taskID,
 				instanceName: sc.instanceName,
 				sessionTitle: sc.sessionTitle,
+				location:     sc.location,
 				tools:        display,
 				elapsed:      time.Since(sc.startedAt),
 			})
@@ -683,7 +697,11 @@ func buildBoardHTML(entries []boardEntry) string {
 		inst := strings.ToValidUTF8(e.instanceName, "\uFFFD")
 
 		sb.WriteString(fmt.Sprintf("\n<b>#%d</b> %s\n", e.taskID, escapeHTML(inst)))
-		sb.WriteString(fmt.Sprintf("  %s (%s)\n", escapeHTML(title), formatElapsed(e.elapsed)))
+		if e.location != "" {
+			sb.WriteString(fmt.Sprintf("  %s · %s (%s)\n", e.location, escapeHTML(title), formatElapsed(e.elapsed)))
+		} else {
+			sb.WriteString(fmt.Sprintf("  %s (%s)\n", escapeHTML(title), formatElapsed(e.elapsed)))
+		}
 
 		for i, t := range e.tools {
 			prefix := "├"

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-telegram/bot"
@@ -20,17 +21,33 @@ import (
 	"github.com/pufanyi/opencode-manager/internal/store"
 )
 
+// pendingPrompt stores a prompt waiting for the user's worktree choice.
+type pendingPrompt struct {
+	text         string // prompt content (empty for pure session creation)
+	inst         *process.Instance
+	userID       int64
+	chatID       int64
+	replyMsgID   int
+	titleHint    string
+	cleanupFiles []string // temp files to remove on discard
+	choiceMsgID  int      // ID of the "where to work?" message
+}
+
 type Handlers struct {
 	procMgr   *process.Manager
 	store     *store.Store
 	streamMgr *StreamManager
+
+	pendingMu      sync.Mutex
+	pendingPrompts map[int64]*pendingPrompt // userID -> pending
 }
 
 func NewHandlers(procMgr *process.Manager, st *store.Store, streamMgr *StreamManager) *Handlers {
 	return &Handlers{
-		procMgr:   procMgr,
-		store:     st,
-		streamMgr: streamMgr,
+		procMgr:        procMgr,
+		store:          st,
+		streamMgr:      streamMgr,
+		pendingPrompts: make(map[int64]*pendingPrompt),
 	}
 }
 
@@ -330,7 +347,11 @@ func (h *Handlers) HandleSession(ctx context.Context, b *bot.Bot, update *models
 	parts := strings.Fields(update.Message.Text)
 
 	if len(parts) >= 2 && parts[1] == "new" {
-		session, err := inst.Provider.CreateSession(ctx)
+		if inst.Provider.SupportsWorktree() {
+			h.showWorktreeChoice(ctx, b, inst, userID, update.Message.Chat.ID, 0, "", "", nil)
+			return
+		}
+		session, err := inst.Provider.CreateSession(ctx, nil)
 		if err != nil {
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: update.Message.Chat.ID,
@@ -499,33 +520,27 @@ func (h *Handlers) HandlePrompt(ctx context.Context, b *bot.Bot, update *models.
 		return
 	}
 
-	// Resolve session: reply to bot message → continue that session; otherwise → new session
-	sessionID, sessionTitle := h.resolveSession(ctx, inst, userID, chatID, update.Message.ReplyToMessage, text)
-	if sessionID == "" {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to create session."})
+	// Try to continue existing session from reply
+	if update.Message.ReplyToMessage != nil {
+		if sessionID, _ := h.store.GetSessionByMessage(chatID, update.Message.ReplyToMessage.ID); sessionID != "" {
+			_ = h.store.SetActiveSession(userID, sessionID)
+			title := ""
+			if cs, _ := h.store.GetClaudeSession(sessionID); cs != nil {
+				title = cs.Title
+			}
+			h.startPrompt(ctx, b, inst, chatID, sessionID, title, text, update.Message.ID, nil)
+			return
+		}
+	}
+
+	// New session needed — ask about worktree if supported
+	if inst.Provider.SupportsWorktree() {
+		h.showWorktreeChoice(ctx, b, inst, userID, chatID, update.Message.ID, text, text, nil)
 		return
 	}
 
-	// Track session activity
-	_ = h.store.UpdateClaudeSessionActivity(sessionID)
-	_ = h.store.SetMessageSession(chatID, update.Message.ID, sessionID)
-
-	// Start prompt via provider
-	promptCtx, promptCancel := context.WithCancel(context.Background())
-	ch, err := inst.Provider.Prompt(promptCtx, sessionID, text)
-	if err != nil {
-		promptCancel()
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    chatID,
-			Text:      fmt.Sprintf("<b>[%s]</b> Failed to send prompt: %s", escapeHTML(inst.Name), err),
-			ParseMode: models.ParseModeHTML,
-		})
-		return
-	}
-
-	// Wire up streaming (no placeholder — status board handles progress display)
-	abortFunc := func() { _ = inst.Provider.Abort(context.Background(), sessionID) }
-	h.streamMgr.StartStream(b, h.store, chatID, sessionID, inst.Name, sessionTitle, inst.Directory, update.Message.ID, ch, promptCancel, abortFunc)
+	// No worktree support — create session directly
+	h.createSessionAndPrompt(ctx, b, inst, userID, chatID, update.Message.ID, text, text, false, nil)
 }
 
 func (h *Handlers) HandlePhoto(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -539,58 +554,63 @@ func (h *Handlers) HandlePhoto(ctx context.Context, b *bot.Bot, update *models.U
 		return
 	}
 
-	// Resolve session via reply
 	titleHint := caption
 	if titleHint == "" {
 		titleHint = "(image)"
 	}
-	sessionID, sessionTitle := h.resolveSession(ctx, inst, userID, chatID, update.Message.ReplyToMessage, titleHint)
-	if sessionID == "" {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to create session."})
+
+	// Try to continue existing session from reply
+	if update.Message.ReplyToMessage != nil {
+		if sessionID, _ := h.store.GetSessionByMessage(chatID, update.Message.ReplyToMessage.ID); sessionID != "" {
+			_ = h.store.SetActiveSession(userID, sessionID)
+			title := ""
+			if cs, _ := h.store.GetClaudeSession(sessionID); cs != nil {
+				title = cs.Title
+			}
+			localPath, prompt, err := h.buildPhotoPrompt(ctx, b, update, inst, caption)
+			if err != nil {
+				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: err.Error()})
+				return
+			}
+			h.startPrompt(ctx, b, inst, chatID, sessionID, title, prompt, update.Message.ID, []string{localPath})
+			return
+		}
+	}
+
+	// Download photo first (needed regardless of worktree choice)
+	localPath, prompt, err := h.buildPhotoPrompt(ctx, b, update, inst, caption)
+	if err != nil {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: err.Error()})
 		return
 	}
 
-	// Pick the largest photo (last in the array)
+	// New session needed — ask about worktree if supported
+	if inst.Provider.SupportsWorktree() {
+		h.showWorktreeChoice(ctx, b, inst, userID, chatID, update.Message.ID, prompt, titleHint, []string{localPath})
+		return
+	}
+
+	// No worktree support — create session directly
+	h.createSessionAndPrompt(ctx, b, inst, userID, chatID, update.Message.ID, prompt, titleHint, false, []string{localPath})
+}
+
+// buildPhotoPrompt downloads the photo and builds the prompt text.
+func (h *Handlers) buildPhotoPrompt(ctx context.Context, b *bot.Bot, update *models.Update, inst *process.Instance, caption string) (string, string, error) {
 	photos := update.Message.Photo
 	photo := photos[len(photos)-1]
 
-	// Download photo to temp file
 	localPath, err := h.downloadTelegramFile(ctx, b, photo.FileID, inst.ID)
 	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: chatID,
-			Text:   fmt.Sprintf("Failed to download image: %s", err),
-		})
-		return
+		return "", "", fmt.Errorf("failed to download image: %s", err)
 	}
 
-	// Build prompt text
 	var prompt string
 	if caption != "" {
 		prompt = fmt.Sprintf("%s\n\nImage file: %s", caption, localPath)
 	} else {
 		prompt = fmt.Sprintf("Please analyze this image.\n\nImage file: %s", localPath)
 	}
-
-	_ = h.store.UpdateClaudeSessionActivity(sessionID)
-	_ = h.store.SetMessageSession(chatID, update.Message.ID, sessionID)
-
-	promptCtx, promptCancel := context.WithCancel(context.Background())
-	ch, err := inst.Provider.Prompt(promptCtx, sessionID, prompt)
-	if err != nil {
-		promptCancel()
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    chatID,
-			Text:      fmt.Sprintf("<b>[%s]</b> Failed to send prompt: %s", escapeHTML(inst.Name), err),
-			ParseMode: models.ParseModeHTML,
-		})
-		os.Remove(localPath)
-		return
-	}
-
-	abortFunc := func() { _ = inst.Provider.Abort(context.Background(), sessionID) }
-	sc := h.streamMgr.StartStream(b, h.store, chatID, sessionID, inst.Name, sessionTitle, inst.Directory, update.Message.ID, ch, promptCancel, abortFunc)
-	sc.AddCleanupFile(localPath)
+	return localPath, prompt, nil
 }
 
 // downloadTelegramFile downloads a Telegram file to /tmp/opencode-manager/{instanceID}/images/.
@@ -646,28 +666,68 @@ func (h *Handlers) downloadTelegramFile(ctx context.Context, b *bot.Bot, fileID,
 	return localPath, nil
 }
 
-// resolveSession determines the session ID for a prompt.
-// If the user is replying to a bot message, it continues that session.
-// Otherwise, it creates a new session.
-func (h *Handlers) resolveSession(ctx context.Context, inst *process.Instance, userID, chatID int64, replyTo *models.Message, titleHint string) (string, string) {
-	// Try to resolve from reply
-	if replyTo != nil {
-		sessionID, _ := h.store.GetSessionByMessage(chatID, replyTo.ID)
-		if sessionID != "" {
-			_ = h.store.SetActiveSession(userID, sessionID)
-			title := ""
-			if cs, _ := h.store.GetClaudeSession(sessionID); cs != nil {
-				title = cs.Title
-			}
-			return sessionID, title
+// showWorktreeChoice stores a pending prompt and shows the worktree choice keyboard.
+func (h *Handlers) showWorktreeChoice(ctx context.Context, b *bot.Bot, inst *process.Instance, userID, chatID int64, replyMsgID int, text, titleHint string, cleanupFiles []string) {
+	h.pendingMu.Lock()
+	old := h.pendingPrompts[userID]
+	pp := &pendingPrompt{
+		text:         text,
+		inst:         inst,
+		userID:       userID,
+		chatID:       chatID,
+		replyMsgID:   replyMsgID,
+		titleHint:    titleHint,
+		cleanupFiles: cleanupFiles,
+	}
+	h.pendingPrompts[userID] = pp
+	h.pendingMu.Unlock()
+
+	// Clean up old pending if any
+	if old != nil {
+		if old.choiceMsgID != 0 {
+			_, _ = b.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: old.chatID, MessageID: old.choiceMsgID})
+		}
+		for _, f := range old.cleanupFiles {
+			os.Remove(f)
 		}
 	}
 
-	// No reply or reply target not found → create new session
-	session, err := inst.Provider.CreateSession(ctx)
+	label := "New task"
+	if text == "" {
+		label = "New session"
+	}
+	params := &bot.SendMessageParams{
+		ChatID:      chatID,
+		Text:        fmt.Sprintf("<b>[%s]</b> %s — where should changes be made?", escapeHTML(inst.Name), label),
+		ParseMode:   models.ParseModeHTML,
+		ReplyMarkup: worktreeChoiceKeyboard(),
+	}
+	if replyMsgID != 0 {
+		params.ReplyParameters = &models.ReplyParameters{
+			MessageID:                replyMsgID,
+			AllowSendingWithoutReply: true,
+		}
+	}
+	msg, _ := b.SendMessage(ctx, params)
+	if msg != nil {
+		h.pendingMu.Lock()
+		if current, ok := h.pendingPrompts[userID]; ok && current == pp {
+			current.choiceMsgID = msg.ID
+		}
+		h.pendingMu.Unlock()
+	}
+}
+
+// createSessionAndPrompt creates a new session and starts the prompt.
+func (h *Handlers) createSessionAndPrompt(ctx context.Context, b *bot.Bot, inst *process.Instance, userID, chatID int64, replyMsgID int, text, titleHint string, useWorktree bool, cleanupFiles []string) {
+	opts := &provider.CreateSessionOpts{UseWorktree: useWorktree}
+	session, err := inst.Provider.CreateSession(ctx, opts)
 	if err != nil {
-		slog.Error("failed to create session", "error", err)
-		return "", ""
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to create session."})
+		for _, f := range cleanupFiles {
+			os.Remove(f)
+		}
+		return
 	}
 	_ = h.store.SetActiveSession(userID, session.ID)
 
@@ -677,7 +737,34 @@ func (h *Handlers) resolveSession(ctx context.Context, inst *process.Instance, u
 	}
 	_ = h.store.UpdateClaudeSessionTitle(session.ID, title)
 
-	return session.ID, title
+	h.startPrompt(ctx, b, inst, chatID, session.ID, title, text, replyMsgID, cleanupFiles)
+}
+
+// startPrompt starts a prompt stream for an existing session.
+func (h *Handlers) startPrompt(ctx context.Context, b *bot.Bot, inst *process.Instance, chatID int64, sessionID, sessionTitle, text string, replyMsgID int, cleanupFiles []string) {
+	_ = h.store.UpdateClaudeSessionActivity(sessionID)
+	_ = h.store.SetMessageSession(chatID, replyMsgID, sessionID)
+
+	promptCtx, promptCancel := context.WithCancel(context.Background())
+	ch, err := inst.Provider.Prompt(promptCtx, sessionID, text)
+	if err != nil {
+		promptCancel()
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
+			Text:      fmt.Sprintf("<b>[%s]</b> Failed to send prompt: %s", escapeHTML(inst.Name), err),
+			ParseMode: models.ParseModeHTML,
+		})
+		for _, f := range cleanupFiles {
+			os.Remove(f)
+		}
+		return
+	}
+
+	abortFunc := func() { _ = inst.Provider.Abort(context.Background(), sessionID) }
+	sc := h.streamMgr.StartStream(b, h.store, chatID, sessionID, inst.Name, sessionTitle, inst.Directory, replyMsgID, ch, promptCancel, abortFunc)
+	for _, f := range cleanupFiles {
+		sc.AddCleanupFile(f)
+	}
 }
 
 // getActiveInstance returns the active instance for a user.

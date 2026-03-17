@@ -107,6 +107,17 @@ type sessionEntry struct {
 	IsActive     bool
 }
 
+func worktreeChoiceKeyboard() *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{
+		InlineKeyboard: [][]models.InlineKeyboardButton{
+			{
+				{Text: "🌿 New Worktree", CallbackData: "wt:worktree"},
+				{Text: "📂 Main Directory", CallbackData: "wt:main"},
+			},
+		},
+	}
+}
+
 func promptDoneKeyboard(sessionID string) *models.InlineKeyboardMarkup {
 	return &models.InlineKeyboardMarkup{
 		InlineKeyboard: [][]models.InlineKeyboardButton{
