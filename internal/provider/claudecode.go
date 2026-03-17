@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -115,6 +116,7 @@ func (p *ClaudeCodeProvider) Prompt(ctx context.Context, sessionID string, conte
 		"-p", content,
 		"--output-format", "stream-json",
 		"--verbose",
+		"--include-partial-messages",
 		"--session-id", sessionID,
 		"--permission-mode", "bypassPermissions",
 	)
@@ -146,6 +148,8 @@ func (p *ClaudeCodeProvider) Prompt(ctx context.Context, sessionID string, conte
 		defer close(ch)
 		defer cancel()
 
+		var acc textAccumulator
+
 		scanner := bufio.NewScanner(stdout)
 		scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 
@@ -155,7 +159,7 @@ func (p *ClaudeCodeProvider) Prompt(ctx context.Context, sessionID string, conte
 				continue
 			}
 
-			evt := parseClaudeEvent(line)
+			evt := parseClaudeEvent(line, &acc)
 			if evt != nil {
 				select {
 				case ch <- *evt:
@@ -209,21 +213,24 @@ func (p *ClaudeCodeProvider) Abort(ctx context.Context, sessionID string) error 
 	return nil
 }
 
-// Claude Code stream-json event types.
-// Format: one JSON object per line.
+// Claude Code stream-json event types (with --include-partial-messages).
+// One JSON object per line:
 //
-// {"type":"system","subtype":"init","session_id":"...","tools":[...],...}
-// {"type":"assistant","message":{"content":[{"type":"text","text":"..."}],...},"session_id":"..."}
-// {"type":"tool_use","tool":{"name":"...","type":"..."},...}
+// {"type":"system","subtype":"init",...}
+// {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}}
+// {"type":"assistant","message":{"content":[{"type":"text","text":"full text"}]},...}
+// {"type":"tool_use","tool":{"name":"..."},...}
 // {"type":"tool_result","tool":{"name":"..."},...}
-// {"type":"result","subtype":"success","result":"full text","session_id":"..."}
-// {"type":"result","subtype":"error","error":"..."}
+// {"type":"result","subtype":"success","result":"full text",...}
 
 type claudeEvent struct {
 	Type    string `json:"type"`
 	Subtype string `json:"subtype,omitempty"`
 
-	// For "assistant" events
+	// For "stream_event"
+	Event *claudeStreamEvent `json:"event,omitempty"`
+
+	// For "assistant" events (full message snapshot)
 	Message *claudeMessage `json:"message,omitempty"`
 
 	// For "result" events
@@ -233,6 +240,17 @@ type claudeEvent struct {
 
 	// For "tool_use" / "tool_result" events
 	Tool *claudeTool `json:"tool,omitempty"`
+}
+
+type claudeStreamEvent struct {
+	Type         string            `json:"type"`
+	Delta        *claudeDelta      `json:"delta,omitempty"`
+	ContentBlock *claudeBlock      `json:"content_block,omitempty"`
+}
+
+type claudeDelta struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
 }
 
 type claudeMessage struct {
@@ -249,14 +267,47 @@ type claudeTool struct {
 	Name string `json:"name,omitempty"`
 }
 
-func parseClaudeEvent(line []byte) *StreamEvent {
+// textAccumulator tracks the full text for streaming display.
+// Claude sends deltas; we accumulate and emit the full text each time
+// so the streaming bridge can display progressively.
+type textAccumulator struct {
+	buf strings.Builder
+}
+
+func (a *textAccumulator) append(delta string) string {
+	a.buf.WriteString(delta)
+	return a.buf.String()
+}
+
+func (a *textAccumulator) reset() {
+	a.buf.Reset()
+}
+
+func parseClaudeEvent(line []byte, acc *textAccumulator) *StreamEvent {
 	var evt claudeEvent
 	if err := json.Unmarshal(line, &evt); err != nil {
 		return nil
 	}
 
 	switch evt.Type {
+	case "stream_event":
+		if evt.Event == nil {
+			return nil
+		}
+		switch evt.Event.Type {
+		case "content_block_delta":
+			if evt.Event.Delta != nil && evt.Event.Delta.Type == "text_delta" && evt.Event.Delta.Text != "" {
+				fullText := acc.append(evt.Event.Delta.Text)
+				return &StreamEvent{Type: "text", Text: fullText}
+			}
+		case "content_block_start":
+			if evt.Event.ContentBlock != nil && evt.Event.ContentBlock.Type == "tool_use" {
+				return &StreamEvent{Type: "tool_use", ToolName: evt.Event.ContentBlock.Name, ToolState: "running"}
+			}
+		}
+
 	case "assistant":
+		// Full message snapshot — use as final text, reset accumulator
 		if evt.Message != nil {
 			var text string
 			for _, block := range evt.Message.Content {
@@ -265,6 +316,8 @@ func parseClaudeEvent(line []byte) *StreamEvent {
 				}
 			}
 			if text != "" {
+				acc.reset()
+				acc.append(text)
 				return &StreamEvent{Type: "text", Text: text}
 			}
 		}
@@ -294,10 +347,6 @@ func parseClaudeEvent(line []byte) *StreamEvent {
 				errMsg = "prompt failed"
 			}
 			return &StreamEvent{Type: "error", Error: errMsg}
-		}
-		// Success — send final text from result field
-		if evt.Result != "" {
-			return &StreamEvent{Type: "text", Text: evt.Result, Done: true}
 		}
 		return &StreamEvent{Type: "done", Done: true}
 	}
