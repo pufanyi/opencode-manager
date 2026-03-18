@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/pufanyi/opencode-manager/internal/bot"
@@ -18,9 +19,10 @@ type App struct {
 	procMgr *process.Manager
 	bot     *bot.Bot
 	web     *web.Server
+	devMode bool
 }
 
-func New(cfg *config.Config) (*App, error) {
+func New(cfg *config.Config, devMode bool) (*App, error) {
 	st, err := store.New(cfg.Storage.Database)
 	if err != nil {
 		return nil, err
@@ -52,6 +54,12 @@ func New(cfg *config.Config) (*App, error) {
 		store:   st,
 		procMgr: procMgr,
 		bot:     tgBot,
+		devMode: devMode,
+	}
+
+	// In dev mode, force-enable web dashboard
+	if devMode && !cfg.Web.Enabled {
+		cfg.Web.Enabled = true
 	}
 
 	// Web dashboard
@@ -101,6 +109,13 @@ func (a *App) Start(ctx context.Context) error {
 
 	// Start web dashboard
 	if a.web != nil {
+		if a.devMode {
+			dp, err := web.StartDevProxy("web")
+			if err != nil {
+				return fmt.Errorf("starting angular dev server: %w", err)
+			}
+			a.web.SetDevProxy(dp)
+		}
 		if err := a.web.Start(ctx); err != nil {
 			slog.Error("failed to start web dashboard", "error", err)
 		}

@@ -28,6 +28,9 @@ type Server struct {
 
 	// WebSocket hub for streaming
 	hub *StreamHub
+
+	// Dev mode: reverse proxy to Angular dev server
+	devProxy *DevProxy
 }
 
 func NewServer(addr string, procMgr *process.Manager, st *store.Store) *Server {
@@ -38,6 +41,12 @@ func NewServer(addr string, procMgr *process.Manager, st *store.Store) *Server {
 		hub:     NewStreamHub(),
 	}
 	return s
+}
+
+// SetDevProxy configures the server to reverse-proxy non-API requests
+// to an Angular dev server instead of serving embedded files.
+func (s *Server) SetDevProxy(dp *DevProxy) {
+	s.devProxy = dp
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -51,20 +60,25 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/abort", s.handleAbort)
 	mux.HandleFunc("/api/ws", s.hub.HandleWebSocket)
 
-	// Serve Angular app
-	distContent, err := fs.Sub(distFS, "dist/browser")
-	if err != nil {
-		return fmt.Errorf("accessing embedded dist: %w", err)
-	}
-	fileServer := http.FileServer(http.FS(distContent))
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// SPA fallback: serve index.html for non-file routes
-		path := r.URL.Path
-		if path != "/" && !strings.Contains(path, ".") {
-			r.URL.Path = "/"
+	if s.devProxy != nil {
+		// Dev mode: reverse proxy to Angular dev server (supports HMR/WebSocket)
+		mux.Handle("/", s.devProxy)
+	} else {
+		// Production: serve embedded Angular build
+		distContent, err := fs.Sub(distFS, "dist/browser")
+		if err != nil {
+			return fmt.Errorf("accessing embedded dist: %w", err)
 		}
-		fileServer.ServeHTTP(w, r)
-	})
+		fileServer := http.FileServer(http.FS(distContent))
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			// SPA fallback: serve index.html for non-file routes
+			path := r.URL.Path
+			if path != "/" && !strings.Contains(path, ".") {
+				r.URL.Path = "/"
+			}
+			fileServer.ServeHTTP(w, r)
+		})
+	}
 
 	s.server = &http.Server{
 		Addr:    s.addr,
@@ -84,6 +98,9 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 func (s *Server) Stop() {
+	if s.devProxy != nil {
+		s.devProxy.Stop()
+	}
 	if s.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

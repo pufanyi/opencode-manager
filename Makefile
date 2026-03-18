@@ -17,10 +17,9 @@ run: build
 	$(BUILD_DIR)/$(BINARY) -config $(CONFIG)
 
 dev:
-	@echo "Building frontend..."
-	@cd web && pnpm ng build --output-path ../internal/web/dist 2>&1 | tail -5
-	@echo "Building and running..."
-	@go build -o $(BUILD_DIR)/$(BINARY) ./cmd/opencode-manager && $(BUILD_DIR)/$(BINARY) -config $(CONFIG)
+	@mkdir -p internal/web/dist/browser
+	@[ -f internal/web/dist/browser/index.html ] || echo '<!doctype html><html><body>dev mode</body></html>' > internal/web/dist/browser/index.html
+	go run ./cmd/opencode-manager -config $(CONFIG) -dev
 
 lint:
 	cd web && pnpm biome check src/

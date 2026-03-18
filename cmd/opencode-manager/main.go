@@ -37,6 +37,7 @@ func runSetup() {
 
 func runServe() {
 	configPath := flag.String("config", "", "path to config file")
+	devMode := flag.Bool("dev", false, "enable dev mode with Angular dev server (HMR)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: opencode-manager [command] [flags]\n\n")
 		fmt.Fprintf(os.Stderr, "Commands:\n")
@@ -91,7 +92,7 @@ func runServe() {
 	}
 
 	// Create application
-	application, err := app.New(cfg)
+	application, err := app.New(cfg, *devMode)
 	if err != nil {
 		slog.Error("failed to initialize application", "error", err)
 		os.Exit(1)
