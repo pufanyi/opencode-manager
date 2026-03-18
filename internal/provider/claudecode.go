@@ -24,13 +24,18 @@ type sessionCmd struct {
 	cancel context.CancelFunc
 }
 
+// DefaultMaxWorktrees is the maximum number of worktrees maintained per instance.
+// When exceeded, the oldest non-active worktree sessions are evicted (FIFO).
+const DefaultMaxWorktrees = 5
+
 // ClaudeCodeProvider manages Claude Code CLI invocations.
 // Supports concurrent prompts across different sessions via git worktrees.
 type ClaudeCodeProvider struct {
-	binary string
-	dir    string
-	store  *store.Store
-	instID string // instance ID for session tracking
+	binary       string
+	dir          string
+	store        *store.Store
+	instID       string // instance ID for session tracking
+	maxWorktrees int    // max worktrees per instance (FIFO eviction)
 
 	mu           sync.Mutex
 	activeCmds   map[string]*sessionCmd // sessionID → active command
@@ -52,6 +57,7 @@ func NewClaudeCodeProvider(binary, dir string, st *store.Store, instanceID strin
 		dir:          dir,
 		store:        st,
 		instID:       instanceID,
+		maxWorktrees: DefaultMaxWorktrees,
 		activeCmds:   make(map[string]*sessionCmd),
 		usedSessions: make(map[string]bool),
 	}
@@ -229,6 +235,61 @@ func (p *ClaudeCodeProvider) syncWorktrees(excludeSessionID, baseBranch string) 
 	}
 }
 
+// enforceWorktreeLimit evicts the oldest non-active worktree sessions (FIFO)
+// to keep the total count under maxWorktrees, making room for one new worktree.
+func (p *ClaudeCodeProvider) enforceWorktreeLimit() {
+	sessions, err := p.store.ListClaudeSessions(p.instID)
+	if err != nil {
+		slog.Warn("failed to list sessions for worktree limit", "error", err)
+		return
+	}
+
+	// Collect sessions that have worktrees (ListClaudeSessions returns newest first)
+	var wtSessions []store.ClaudeSession
+	for _, s := range sessions {
+		if s.WorktreePath != "" {
+			wtSessions = append(wtSessions, s)
+		}
+	}
+
+	// Need to make room for one new worktree
+	if len(wtSessions) < p.maxWorktrees {
+		return
+	}
+	evictCount := len(wtSessions) - p.maxWorktrees + 1
+
+	// Snapshot active sessions to avoid evicting running ones
+	p.mu.Lock()
+	activeSet := make(map[string]bool, len(p.activeCmds))
+	for sid := range p.activeCmds {
+		activeSet[sid] = true
+	}
+	p.mu.Unlock()
+
+	// Evict from oldest (end of slice) to newest
+	evicted := 0
+	for i := len(wtSessions) - 1; i >= 0 && evicted < evictCount; i-- {
+		s := wtSessions[i]
+		if activeSet[s.ID] {
+			continue
+		}
+
+		slog.Info("evicting old worktree (FIFO)", "session", s.ID[:12], "branch", s.Branch)
+		if s.WorktreePath != "" {
+			_ = p.removeWorktree(s.WorktreePath)
+		}
+		if s.Branch != "" {
+			_ = exec.Command("git", "-C", p.dir, "branch", "-D", s.Branch).Run()
+		}
+		_ = p.store.DeleteClaudeSession(s.ID)
+		evicted++
+	}
+
+	if evicted > 0 {
+		slog.Info("worktree FIFO eviction done", "evicted", evicted, "limit", p.maxWorktrees)
+	}
+}
+
 func (p *ClaudeCodeProvider) SupportsWorktree() bool {
 	return p.isGitRepo()
 }
@@ -286,6 +347,9 @@ func (p *ClaudeCodeProvider) CreateSession(ctx context.Context, opts *CreateSess
 
 	var wtPath, branch string
 	if opts != nil && opts.UseWorktree && p.isGitRepo() {
+		// Evict oldest worktrees if at limit (FIFO)
+		p.enforceWorktreeLimit()
+
 		var err error
 		wtPath, branch, err = p.createWorktree(id)
 		if err != nil {
