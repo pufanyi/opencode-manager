@@ -31,13 +31,18 @@ Each instance can have multiple sessions (conversations). A session maintains it
 
 - Create new sessions: `/session new`
 - Switch between sessions: `/sessions` then tap one
+- Delete sessions: tap 🗑 in the session list
 - Prompts go to your currently active session
 
 Sessions are auto-created when you send your first prompt. The first message is used as the session title.
 
+**Worktree sessions** — For Claude Code instances in a git repo, each session can optionally run in its own git worktree. When creating a session or sending a new prompt, you'll be asked to choose "🌿 New Worktree" (isolated branch) or "📂 Main Directory". Worktree sessions are automatically merged back to the main branch after each prompt completes.
+
 ### Active Context
 
 Each Telegram user has an **active instance** and **active session**. All prompts and commands operate on this context. Use `/status` to see your current context.
+
+You can also **reply to any bot response** to continue that specific session, even if you've since switched to a different instance or session.
 
 ## Commands
 
@@ -123,9 +128,11 @@ Create a new session in the active instance.
 /session new
 ```
 
+For Claude Code instances in git repos, this will prompt you to choose between a new worktree or the main directory.
+
 ### `/session`
 
-Show info about your current session, including title, message count, and last activity time.
+Show info about your current session, including title, message count, last activity time, and branch name (if worktree).
 
 ### `/sessions`
 
@@ -136,7 +143,7 @@ List all sessions in the active instance. Shows:
 - Last activity time
 - Active session indicator (▶)
 
-Tap a session to switch to it. Limited to 20 sessions in the list.
+Tap a session to switch to it. Tap 🗑 to delete a session (also removes its worktree and branch if applicable). A "+ New Session" button at the bottom creates a fresh session. Limited to 20 sessions in the list.
 
 ### `/abort`
 
@@ -152,15 +159,20 @@ Any text message that isn't a command is sent as a prompt to your active instanc
 
 **What happens:**
 
-1. A placeholder message appears: `[instance-name] Thinking...`
+1. If this is your first prompt (no active session) and the instance is a git repo:
+   - A keyboard appears asking "🌿 New Worktree" or "📂 Main Directory"
+   - Your choice determines whether the session runs in an isolated branch
 2. The prompt is sent to the provider (Claude Code or OpenCode)
-3. Streaming events arrive as the AI processes the request
-4. The placeholder is progressively edited with the response (converted to Telegram HTML)
-5. Tool invocations appear with status icons:
-   - ⏳ Running
-   - ✅ Completed
-   - ❌ Error
-6. When done, action buttons appear: **[Abort]** and **[New Session]**
+3. The **Active Tasks board** appears showing real-time progress:
+   - Tool invocations with status icons (⏳ running, ✅ done, ❌ error) and details
+   - Elapsed time for each task
+   - "Stop #N" buttons to cancel tasks
+4. When done, the final response is sent as a **reply** to your original message
+5. For worktree sessions: the branch is auto-merged back to main
+
+### Replying to Continue
+
+You can **reply to any bot response** to continue that specific session with a new prompt. This works even if you've switched to a different instance or session — the reply automatically targets the correct session.
 
 ### Sending Photos
 
@@ -173,9 +185,16 @@ Photos are stored temporarily and cleaned up after the prompt completes.
 - Messages are automatically split at Telegram's 4096-character limit
 - Very long responses (>12,000 characters) are sent as a `.md` file attachment
 
-### Rate Limiting
+### Active Tasks Board
 
-Updates are batched every 5 seconds (2 seconds for drafts in private chats) to stay within Telegram's API limits. You won't see every character, but the response builds up progressively.
+While any prompts are running, a live status message appears at the bottom of the chat. It shows all active tasks as blockquote cards with:
+
+- Task number, instance name, and elapsed time
+- Session location (🌿 worktree or 📂 main dir) and title
+- Tool invocations with status icons and details (e.g., file paths, command descriptions)
+- "Stop #N" inline buttons to cancel individual tasks
+
+The board refreshes at a configurable interval (default 2s, set via `telegram.board_interval`). It repositions to the bottom when new messages appear and disappears automatically when all tasks finish.
 
 ## Inline Keyboard Actions
 
@@ -189,15 +208,22 @@ Many commands produce inline keyboards. Available actions:
 | **Delete** | Remove instance permanently |
 | **Switch** | Switch active context |
 | Session Title | Switch to that session |
-| **Abort** | Abort the running prompt |
-| **New Session** | Create a fresh session |
+| 🗑 | Delete session (and its worktree/branch if any) |
+| **+ New Session** | Create a fresh session |
+| **🌿 New Worktree** | Create session in an isolated git worktree |
+| **📂 Main Directory** | Create session in the project's main directory |
+| **Stop #N** | Stop a specific running task (on the Active Tasks board) |
+| **🔧 Fix with Claude** | Create a session to resolve a merge conflict |
 
 ## Tips
 
 - **Quick start**: `/new proj /path` → immediately type your prompt
 - **Multiple projects**: Use `/list` and tap to switch between instances rapidly
-- **Fresh context**: Tap "New Session" after finishing a topic to start clean
+- **Fresh context**: Use `/sessions` and tap "+ New Session" to start clean
+- **Reply to continue**: Reply to any bot response to keep talking to that session
+- **Parallel work**: Use worktrees to run multiple sessions on the same repo without conflicts
 - **Check status**: `/status` shows what instance, provider, and session you're talking to
-- **Emergency stop**: `/abort` if a prompt is running too long
+- **Emergency stop**: Use "Stop #N" on the Active Tasks board, or `/abort` for the active session
 - **Visual analysis**: Send a photo with a caption to have Claude Code analyze it
 - **Provider choice**: Use `/new` for Claude Code (default, recommended), `/newopencode` for OpenCode
+- **Merge conflicts**: If auto-merge fails, tap "🔧 Fix with Claude" to let Claude resolve it

@@ -6,7 +6,10 @@ A single-binary tool that manages multiple [Claude Code](https://docs.anthropic.
 
 - **Dual provider support** — Run both Claude Code (CLI) and OpenCode (HTTP) instances side by side
 - **Telegram interface** — Create, start, stop, switch, and prompt instances from any Telegram client
-- **Real-time streaming** — See AI responses stream in as progressive Telegram message edits
+- **Active Tasks board** — Live status dashboard in Telegram showing all running tasks with tool progress, elapsed time, and stop buttons
+- **Git worktree isolation** — Each session can run in its own git worktree for parallel, conflict-free work
+- **Auto-merge** — Worktree branches are automatically merged back to main after each prompt; merge conflicts trigger a "Fix with Claude" button
+- **Reply-to-continue** — Reply to any bot response to continue that session, even if you've switched away
 - **Photo support** — Send images to Claude Code for visual analysis directly from Telegram
 - **Crash recovery** — Auto-restarts crashed instances with exponential backoff and notifies you on permanent failure
 - **Persistent state** — SQLite database tracks instances, sessions, and per-user context across restarts
@@ -101,12 +104,13 @@ See [`configs/opencode-manager.example.yaml`](configs/opencode-manager.example.y
 
 | Command | Description |
 |---------|-------------|
-| `/session new` | Create a new session in the active instance |
-| `/session` | Show current session info |
-| `/sessions` | List all sessions (tap to switch) |
+| `/session new` | Create a new session (prompts for worktree choice in git repos) |
+| `/session` | Show current session info (including branch if worktree) |
+| `/sessions` | List all sessions (tap to switch, 🗑 to delete) |
 | `/abort` | Abort the running prompt |
 | _any text_ | Send as a prompt to the active instance |
 | _photo_ | Download image and send to Claude Code for analysis |
+| _reply to bot message_ | Continue that session with a new prompt |
 
 ### General
 
@@ -126,14 +130,38 @@ You (Telegram) ──→ Bot ──→ OpenCode Manager ──→ Claude Code (C
 
 1. The manager spawns provider processes: `claude -p` per prompt (Claude Code) or `opencode serve` as a persistent server (OpenCode)
 2. When you send a text or photo message, it's forwarded as a prompt to your active instance
-3. The provider streams its response back via JSON streaming (Claude Code) or SSE (OpenCode)
-4. The streaming bridge progressively edits your Telegram message with rate-limited updates
+3. For git repos, you're asked whether to work in a **new worktree** (isolated branch) or the **main directory**
+4. The provider streams its response back via JSON streaming (Claude Code) or SSE (OpenCode)
+5. An **Active Tasks board** in Telegram shows real-time tool progress for all running prompts
+6. When the prompt completes, the final response is sent as a reply to your original message
+7. Worktree branches are **auto-merged** back to main; merge conflicts offer a "Fix with Claude" button
 
 ### Provider Types
 
-**Claude Code** (default) — Spawns `claude -p` per prompt with JSON streaming output. No persistent server process. Sessions tracked in SQLite with `--resume` support.
+**Claude Code** (default) — Spawns `claude -p` per prompt with JSON streaming output. No persistent server process. Sessions tracked in SQLite with `--resume` support. Supports git worktree isolation for concurrent sessions.
 
 **OpenCode** — Runs `opencode serve` as a persistent HTTP server per instance. Each instance gets a dedicated port and Basic Auth credentials. Communicates via REST API + SSE.
+
+### Git Worktree Isolation
+
+When a Claude Code instance is in a git repository, each new session can optionally run in its own git worktree:
+
+- **Parallel work** — Multiple sessions can edit different files without conflicting
+- **Auto-merge** — After each prompt completes, the session branch is merged back to the main branch
+- **Cross-sync** — After a merge, other active worktrees are rebased onto the updated main branch
+- **Conflict handling** — If auto-merge fails, a notification with a "🔧 Fix with Claude" button creates a new session to resolve the conflict
+- **Cleanup** — Deleting a session removes its worktree and branch
+
+### Active Tasks Board
+
+While prompts are running, a live status board appears at the bottom of the Telegram chat:
+
+- Shows each running task with instance name, session title, elapsed time
+- Displays tool invocations with status icons (⏳ running, ✅ done, ❌ error) and details
+- "Stop #N" buttons to cancel individual tasks
+- Refreshes at a configurable interval (default 2s via `telegram.board_interval`)
+- Auto-repositions to the bottom when new messages appear
+- Disappears when all tasks complete
 
 ### Crash Recovery
 
@@ -144,15 +172,13 @@ When an instance crashes unexpectedly:
 3. After 3 failures (configurable), marks as permanently failed
 4. Sends a Telegram notification to all authorized users
 
-### Streaming to Telegram
+### Response Delivery
 
-The streaming bridge handles Telegram's constraints:
-
-- **Rate limiting** — Edits are coalesced into 5-second intervals (2s for drafts) with a global 25-request semaphore
+- **Final reply** — Completed responses are sent as a reply to the original user message
 - **Message splitting** — Auto-splits at 4096 characters (Telegram's limit)
 - **File fallback** — Sends as a `.md` file if the response exceeds ~12,000 characters
-- **Tool indicators** — Shows tool invocations with status icons (⏳ running, ✅ done, ❌ error)
 - **HTML rendering** — Markdown converted to Telegram HTML with tag balancing and safe truncation
+- **Reply-to-continue** — Reply to any bot response to resume that session, even after switching
 
 ### Web Dashboard
 
@@ -173,16 +199,17 @@ internal/
 ├── config/config.go         YAML config + env overrides + validation
 ├── store/
 │   ├── store.go             SQLite connection (WAL mode, pure Go)
-│   ├── migrations.go        Schema: instances, user_state, claude_sessions tables
+│   ├── migrations.go        Schema: instances, user_state, claude_sessions, message_sessions
 │   ├── instance.go          Instance CRUD
-│   └── userstate.go         Per-user active instance/session tracking
+│   ├── userstate.go         Per-user active instance/session tracking
+│   └── message_session.go   Telegram message → session mapping (reply-to-continue)
 ├── process/
 │   ├── portpool.go          Thread-safe port allocation
 │   ├── instance.go          Instance state wrapper
 │   └── manager.go           Orchestrator: create, health check, crash recovery
 ├── provider/
 │   ├── provider.go          Provider interface (abstraction layer)
-│   ├── claudecode.go        Claude Code CLI implementation
+│   ├── claudecode.go        Claude Code CLI + worktree + auto-merge implementation
 │   └── opencode.go          OpenCode HTTP+SSE implementation
 ├── opencode/
 │   ├── types.go             API types (Session, Message, SSEEvent, etc.)
@@ -190,11 +217,13 @@ internal/
 │   └── sse.go               SSE subscriber with auto-reconnect
 ├── bot/
 │   ├── bot.go               Telegram bot setup, auth middleware
-│   ├── handlers.go          Command handlers + prompt/photo forwarding
-│   ├── callbacks.go         Inline keyboard callback handlers
-│   ├── keyboard.go          Inline keyboard builders
-│   ├── streaming.go         Provider-to-Telegram bridge with rate limiting
+│   ├── handlers.go          Command handlers + prompt/photo forwarding + worktree choice
+│   ├── callbacks.go         Inline keyboard callback handlers (incl. merge fix, session delete)
+│   ├── keyboard.go          Inline keyboard builders (incl. worktree choice)
+│   ├── streaming.go         Active Tasks board + response delivery + merge-back
 │   └── format.go            Markdown→Telegram HTML, tag balancing, utilities
+├── gitops/
+│   └── merge.go             Git worktree merge-back (fast-forward + linked worktree)
 ├── web/
 │   ├── server.go            Web dashboard HTTP server + SSE streaming hub
 │   └── dist/                Embedded Angular build artifacts

@@ -49,7 +49,7 @@ Loads YAML configuration with sensible defaults and environment variable overrid
 
 ### Store (`internal/store`)
 
-Pure-Go SQLite database (no CGo dependency). Three tables:
+Pure-Go SQLite database (no CGo dependency). Four tables:
 
 **`instances`** — Persistent record of all managed instances.
 
@@ -83,6 +83,17 @@ title TEXT DEFAULT ''           -- Auto-titled from first prompt
 created_at DATETIME
 updated_at DATETIME
 message_count INTEGER DEFAULT 0 -- Prompt history depth
+worktree_path TEXT DEFAULT ''   -- Git worktree directory (empty = main dir)
+branch TEXT DEFAULT ''          -- Git branch name (empty = no worktree)
+```
+
+**`message_sessions`** — Maps Telegram messages to sessions (enables reply-to-continue).
+
+```sql
+chat_id INTEGER NOT NULL        -- Telegram chat ID
+message_id INTEGER NOT NULL     -- Telegram message ID
+session_id TEXT NOT NULL        -- Session that produced this message
+PRIMARY KEY (chat_id, message_id)
 ```
 
 Uses WAL journal mode and 5-second busy timeout for safe concurrent access.
@@ -92,6 +103,7 @@ Uses WAL journal mode and 5-second busy timeout for safe concurrent access.
 Defines a common `Provider` interface with two implementations:
 
 **Interface methods:**
+- `Type()` — Return provider backend type
 - `Start(ctx)` — Spawn process
 - `Stop()` — Terminate process
 - `Wait()` — Block until process exits
@@ -100,19 +112,25 @@ Defines a common `Provider` interface with two implementations:
 - `HealthCheck(ctx)` — Ping endpoint
 - `Stderr()` — Return last error output
 - `SetPort(int)` — Update port
-- `CreateSession(ctx)` — New session
+- `CreateSession(ctx, opts)` — New session (opts controls worktree creation)
 - `GetSession(ctx, id)` — Fetch session
 - `ListSessions(ctx)` — List all sessions
+- `SupportsWorktree()` — Whether this provider can create git worktrees
 - `Prompt(ctx, sessionID, content)` — Send prompt, return event channel
 - `Abort(ctx, sessionID)` — Cancel running prompt
 
+**StreamEvent types:** `text`, `tool_use`, `done`, `error`, `merge_failed`
+
 **Claude Code Provider** (`claudecode.go`):
 - No persistent server process
-- Spawns `claude -p` per prompt with `--output-format json`
+- Spawns `claude -p` per prompt with `--output-format stream-json`
 - Uses `--resume <sessionID>` for existing sessions
 - Reads JSON-streaming output, emits `StreamEvent`s
 - Session tracking via SQLite `claude_sessions` table
 - No port allocation needed; `WaitReady` returns immediately
+- **Git worktree support**: creates isolated worktrees per session (`SupportsWorktree()` returns true for git repos)
+- **Auto-merge**: after prompt completion, merges session branch back to main and rebases other active worktrees
+- **DeleteSession**: removes worktree directory and branch
 
 **OpenCode Provider** (`opencode.go`):
 - Persistent `opencode serve` child process per instance
@@ -120,6 +138,7 @@ Defines a common `Provider` interface with two implementations:
 - Basic Auth with random 32-hex password
 - Config injected via `OPENCODE_CONFIG_CONTENT` env var
 - Port allocated from configurable range
+- No worktree support (`SupportsWorktree()` returns false)
 
 ### Process Manager (`internal/process`)
 
@@ -174,29 +193,53 @@ All requests use HTTP Basic Auth (empty username, instance password).
 
 **Command Routing** — Commands are matched by prefix (e.g., `/new` matches `/new`, `/new test`, `/new@bot_name`). Unrecognized messages fall through to the default handler, which forwards them as prompts. Photos are routed to the photo handler.
 
-**Streaming Bridge** (`streaming.go`) — Translates provider events into Telegram message edits:
+**Worktree Choice** — When a Claude Code instance is in a git repo, new sessions and prompts show an inline keyboard asking "🌿 New Worktree" or "📂 Main Directory". The choice is stored as a pending prompt until the user picks.
+
+**Reply-to-Continue** — When a user replies to a bot response, the handler looks up the session that produced that message (via `message_sessions` table) and continues it, bypassing the worktree choice flow.
+
+**Active Tasks Board** (`streaming.go`) — A consolidated live status message at the bottom of each chat:
 
 ```
 User sends text/photo
-  → Bot sends placeholder "[instance] Thinking..."
+  → For git repos: show worktree choice keyboard, wait for selection
+  → Create session (with or without worktree)
   → Provider.Prompt fires, returns event channel
   → StreamContext buffers content + tool statuses
-  → editLoop (5s ticker, 2s for drafts) flushes to Telegram
-  → Markdown → Telegram HTML conversion with tag balancing
-  → If content > 4096 chars: split into continuation messages
-  → If content > 12000 chars: send as .md file
-  → On completion: final edit with [Abort] [New Session] keyboard
+  → Active Tasks board refreshes on a timer (default 2s):
+      - Shows all running tasks as blockquote cards
+      - Displays tool invocations with ⏳/✅/❌ icons and details
+      - "Stop #N" buttons to cancel individual tasks
+      - Repositions to bottom when new messages appear
+  → On completion:
+      - Final response sent as reply to user's original message
+      - Markdown → Telegram HTML conversion with tag balancing
+      - If content > 4096 chars: split into continuation messages
+      - If content > 12000 chars: send as .md file
+      - Auto-merge worktree branch back to main (if applicable)
+      - Board removes completed task (disappears when all tasks done)
 ```
 
 **Rate Limiting:**
-- Per-stream: 5-second edit coalescing interval (2s for drafts)
 - Global: 25-permit semaphore (Telegram limit ≈ 30 msgs/sec, with margin)
+
+**Merge Notifications** — After a prompt completes in a worktree session:
+- Success: "✅ merged N commit(s) from branch into main"
+- Failure: "⚠️ Auto-merge failed" with a "🔧 Fix with Claude" button that creates a new session to resolve the conflict
 
 **Message Formatting** (`format.go`) — Converts Markdown to Telegram-compatible HTML using goldmark. Handles:
 - Heading/list/table/checkbox conversion to Telegram-safe equivalents
 - HTML tag balancing (close unclosed tags, fix nesting violations)
 - HTML-aware truncation (doesn't break tags or entities)
 - UTF-8 safe truncation
+
+### Git Operations (`internal/gitops`)
+
+Provides git worktree merge-back logic used by `streaming.go` after prompt completion:
+
+- Detects main/master branch names
+- Handles both linked worktrees (merge from main worktree) and regular repos (fast-forward ref update)
+- Aborts on merge conflict and reports the error
+- Used as a secondary merge path alongside the provider's own `mergeAndSync`
 
 ### Web Dashboard (`internal/web`)
 
@@ -225,17 +268,23 @@ Optional Angular-based web UI, embedded in the binary via `go:embed`.
 ### Prompt Lifecycle
 
 ```
-1. Telegram message (text or photo) arrives
-2. Auth check (allowed_users)
-3. Look up user_state → active_instance_id + active_session_id
-4. Auto-create session if none exists (auto-title from first prompt)
-5. For photos: download image to temp file, include path in prompt
-6. Send placeholder Telegram message
-7. Call Provider.Prompt(sessionID, content) → returns event channel
-8. StreamContext reads events, buffers text + tool invocations
-9. Edit timer fires → EditMessageText with Telegram HTML
-10. On completion → final edit with action keyboard
-11. Cleanup (temp image files, stream context)
+1.  Telegram message (text or photo) arrives
+2.  Auth check (allowed_users)
+3.  If reply to a bot message → look up session from message_sessions table
+4.  Otherwise: look up user_state → active_instance_id
+5.  For photos: download image to temp file, include path in prompt
+6.  If new session needed and provider supports worktree:
+    → Show "🌿 New Worktree" / "📂 Main Directory" choice keyboard
+    → Store pending prompt until user selects
+7.  Create session (with or without worktree) and auto-title from first prompt
+8.  Call Provider.Prompt(sessionID, content) → returns event channel
+9.  StreamContext reads events, buffers text + tool invocations
+10. Active Tasks board refreshes periodically, showing tool progress
+11. On completion → send final response as reply to original message
+12. Auto-merge worktree branch back to main (if applicable)
+    → On merge failure: send notification with "Fix with Claude" button
+13. Board removes task; disappears when all tasks complete
+14. Cleanup (temp image files, stream context)
 ```
 
 ### Manager Restart

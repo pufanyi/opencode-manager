@@ -18,6 +18,7 @@ Run `opencode-manager setup` to generate a config interactively.
 telegram:
   token: "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
   allowed_users: [123456789, 987654321]
+  board_interval: 2s
 
 process:
   opencode_binary: "opencode"
@@ -50,12 +51,15 @@ web:
 
 ### `telegram`
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `token` | string | Yes | Bot token from [@BotFather](https://t.me/BotFather) |
-| `allowed_users` | int64[] | Yes | Telegram user IDs authorized to use the bot |
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `token` | string | Yes | — | Bot token from [@BotFather](https://t.me/BotFather) |
+| `allowed_users` | int64[] | Yes | — | Telegram user IDs authorized to use the bot |
+| `board_interval` | duration | No | `2s` | Refresh interval for the Active Tasks status board |
 
 Only users in `allowed_users` can interact with the bot. All other messages are silently ignored.
+
+The `board_interval` controls how often the Active Tasks board updates in Telegram. Lower values give more responsive tool progress but use more API calls. Values below 1s are not recommended due to Telegram rate limits.
 
 ### `process`
 

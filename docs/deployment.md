@@ -42,6 +42,7 @@ Make sure your provider binaries are installed:
 
 - **Claude Code**: `claude` must be in `$PATH` (or set `claudecode_binary` in config)
 - **OpenCode**: `opencode` must be in `$PATH` (or set `opencode_binary` in config)
+- **Git**: Required for worktree isolation features (git worktree, auto-merge). Claude Code instances in non-git directories work fine without it.
 
 ## First-time Setup
 
@@ -103,7 +104,7 @@ The service needs write access to:
 
 - The SQLite database directory (default: `./data/`)
 - Any project directories where the AI coding tools will write files
-- `/tmp/opencode-manager/` (for temporary image downloads from Telegram)
+- `/tmp/opencode-manager/` (for temporary image downloads, worktree directories)
 
 Update `ReadWritePaths` accordingly.
 
