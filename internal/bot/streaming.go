@@ -62,12 +62,12 @@ type StreamContext struct {
 	mergeError  string
 	mergeBranch string
 
-	dirty        bool
-	done         bool
-	superseded   bool // true if replaced by a newer stream for the same session
-	cancel       context.CancelFunc
-	promptCancel context.CancelFunc
-	abortFunc    func()
+	dirty           bool
+	done            bool
+	superseded      bool // true if replaced by a newer stream for the same session
+	cancel          context.CancelFunc
+	promptCancel    context.CancelFunc
+	abortFunc       func()
 	cleanupFiles    []string // temp files to remove when stream ends
 	onDoneCallbacks []func()
 }
@@ -81,13 +81,13 @@ type StreamManager struct {
 	nextID    int
 
 	// Status board
-	b              *bot.Bot
-	boardMu        sync.Mutex
-	boardMsgs      map[int64]int    // chatID -> board message ID
-	boardContent   map[int64]string // chatID -> last sent content
-	boardRepos     map[int64]bool   // chatID -> needs reposition (new msg appeared)
-	boardStarted   bool
-	boardInterval  time.Duration
+	b             *bot.Bot
+	boardMu       sync.Mutex
+	boardMsgs     map[int64]int    // chatID -> board message ID
+	boardContent  map[int64]string // chatID -> last sent content
+	boardRepos    map[int64]bool   // chatID -> needs reposition (new msg appeared)
+	boardStarted  bool
+	boardInterval time.Duration
 }
 
 func NewStreamManager(boardInterval time.Duration) *StreamManager {
