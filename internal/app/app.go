@@ -8,7 +8,6 @@ import (
 	"github.com/pufanyi/opencode-manager/internal/bot"
 	"github.com/pufanyi/opencode-manager/internal/config"
 	"github.com/pufanyi/opencode-manager/internal/process"
-	"github.com/pufanyi/opencode-manager/internal/provider"
 	"github.com/pufanyi/opencode-manager/internal/store"
 	"github.com/pufanyi/opencode-manager/internal/web"
 )
@@ -22,12 +21,7 @@ type App struct {
 	devMode bool
 }
 
-func New(cfg *config.Config, devMode bool) (*App, error) {
-	st, err := store.New(cfg.Storage.Database)
-	if err != nil {
-		return nil, err
-	}
-
+func New(cfg *config.Config, st *store.Store, devMode bool) (*App, error) {
 	portPool := process.NewPortPool(cfg.Process.PortRange.Start, cfg.Process.PortRange.End)
 	procMgr := process.NewManager(
 		context.Background(),
@@ -41,7 +35,6 @@ func New(cfg *config.Config, devMode bool) (*App, error) {
 
 	tgBot, err := bot.New(&cfg.Telegram, procMgr, st)
 	if err != nil {
-		st.Close()
 		return nil, err
 	}
 
@@ -83,28 +76,6 @@ func (a *App) Start(ctx context.Context) error {
 		slog.Error("failed to load stopped instances", "error", err)
 	}
 
-	for _, proj := range a.cfg.Projects {
-		provType := provider.Type(proj.Provider)
-		if provType == "" {
-			provType = provider.TypeClaudeCode
-		}
-
-		existing := a.procMgr.GetInstanceByName(proj.Name)
-		if existing != nil {
-			if proj.AutoStart && existing.Status() != process.StatusRunning {
-				if err := a.procMgr.StartInstance(existing.ID); err != nil {
-					slog.Error("failed to auto-start project", "name", proj.Name, "error", err)
-				}
-			}
-			continue
-		}
-
-		_, err := a.procMgr.CreateAndStart(proj.Name, proj.Directory, proj.AutoStart, provType)
-		if err != nil {
-			slog.Error("failed to create project", "name", proj.Name, "error", err)
-		}
-	}
-
 	a.procMgr.StartHealthChecks()
 
 	// Start web dashboard
@@ -134,5 +105,5 @@ func (a *App) Shutdown() {
 		a.web.Stop()
 	}
 	a.procMgr.Shutdown()
-	a.store.Close()
+	// Note: store is closed by main, not by app
 }

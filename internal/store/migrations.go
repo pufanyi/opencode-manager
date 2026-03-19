@@ -39,6 +39,10 @@ func (s *Store) migrate() error {
 			session_id TEXT NOT NULL,
 			PRIMARY KEY (chat_id, message_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)`,
 	}
 
 	for i, m := range migrations {

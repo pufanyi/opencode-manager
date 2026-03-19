@@ -5,13 +5,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 
-	"text/template"
-
 	"github.com/pufanyi/opencode-manager/internal/config"
+	"github.com/pufanyi/opencode-manager/internal/store"
 )
 
 const (
@@ -23,7 +21,10 @@ const (
 	colorRed    = "\033[0;31m"
 )
 
-func Run(outputPath string) error {
+const totalSteps = 5
+
+// Run runs the interactive setup wizard, writing config to the given store.
+func Run(st *store.Store) error {
 	reader := bufio.NewReader(os.Stdin)
 	stepNum = 0
 
@@ -59,51 +60,20 @@ func Run(outputPath string) error {
 		return err
 	}
 
-	// Step 6: Database Path
-	dbPath, err := stepDatabase(reader)
-	if err != nil {
-		return err
+	// Build config and save to DB
+	cfg := config.Defaults()
+	cfg.Telegram.Token = token
+	cfg.Telegram.AllowedUsers = users
+	cfg.Process.OpencodeBinary = binary
+	cfg.Process.ClaudeCodeBinary = claudeBinary
+	cfg.Process.PortRange.Start = portStart
+	cfg.Process.PortRange.End = portEnd
+
+	if err := st.SetSettings(cfg.ToSettings()); err != nil {
+		return fmt.Errorf("saving settings to database: %w", err)
 	}
 
-	// Step 7: Projects
-	projects, err := stepProjects(reader)
-	if err != nil {
-		return err
-	}
-
-	// Handle existing file
-	if outputPath == "" {
-		outputPath = "opencode-manager.yaml"
-	}
-	if _, err := os.Stat(outputPath); err == nil {
-		overwrite := prompt(reader, colorYellow+outputPath+" already exists. Overwrite? [y/N]: "+colorReset)
-		if !strings.HasPrefix(strings.ToLower(overwrite), "y") {
-			outputPath = "opencode-manager.new.yaml"
-			fmt.Printf("  Writing to %s instead.\n", outputPath)
-		}
-	}
-
-	// Ensure parent directory exists
-	if dir := filepath.Dir(outputPath); dir != "." {
-		_ = os.MkdirAll(dir, 0755)
-	}
-
-	// Write config from template
-	data := configData{
-		Token:        token,
-		Users:        users,
-		Binary:       binary,
-		ClaudeBinary: claudeBinary,
-		PortStart:    portStart,
-		PortEnd:      portEnd,
-		DBPath:       dbPath,
-		Projects:     projects,
-	}
-	if err := writeConfig(outputPath, data); err != nil {
-		return err
-	}
-
-	printDone(outputPath)
+	printDone()
 	return nil
 }
 
@@ -111,7 +81,7 @@ func Run(outputPath string) error {
 
 func stepToken(r *bufio.Reader) (string, error) {
 	stepNum++
-	printStep(stepNum, 7, "Telegram Bot Token")
+	printStep(stepNum, totalSteps, "Telegram Bot Token")
 	hint("Create a bot via @BotFather on Telegram to get your token.")
 
 	for {
@@ -128,7 +98,7 @@ func stepToken(r *bufio.Reader) (string, error) {
 
 func stepUsers(r *bufio.Reader) ([]int64, error) {
 	stepNum++
-	printStep(stepNum, 7, "Allowed Telegram User IDs")
+	printStep(stepNum, totalSteps, "Allowed Telegram User IDs")
 	hint("Send /start to @userinfobot on Telegram to find your user ID.")
 
 	var users []int64
@@ -157,7 +127,7 @@ var stepNum int
 
 func stepBinary(r *bufio.Reader, defaultName, label string) (string, error) {
 	stepNum++
-	printStep(stepNum, 7, label+" Binary Path")
+	printStep(stepNum, totalSteps, label+" Binary Path")
 
 	detected := ""
 	if p, err := exec.LookPath(defaultName); err == nil {
@@ -188,7 +158,7 @@ func stepBinary(r *bufio.Reader, defaultName, label string) (string, error) {
 
 func stepPorts(r *bufio.Reader) (int, int, error) {
 	stepNum++
-	printStep(stepNum, 7, "Port Range")
+	printStep(stepNum, totalSteps, "Port Range")
 	hint("Range of ports for OpenCode instances (1 port per instance).")
 
 	startStr := prompt(r, "  Start port [14096]: ")
@@ -215,84 +185,6 @@ func stepPorts(r *bufio.Reader) (int, int, error) {
 	printOK("%d slots available", end-start)
 	fmt.Println()
 	return start, end, nil
-}
-
-func stepDatabase(r *bufio.Reader) (string, error) {
-	stepNum++
-	printStep(stepNum, 7, "Database Path")
-
-	val := prompt(r, "  SQLite database path [./data/opencode-manager.db]: ")
-	if val == "" {
-		val = "./data/opencode-manager.db"
-	}
-
-	dir := filepath.Dir(val)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		printWarn("Could not create directory %s: %v", dir, err)
-	}
-
-	fmt.Println()
-	return val, nil
-}
-
-func stepProjects(r *bufio.Reader) ([]config.ProjectConfig, error) {
-	stepNum++
-	printStep(stepNum, 7, "Pre-register Projects (optional)")
-	hint("Add projects to auto-manage. Leave name empty to skip/finish.")
-
-	var projects []config.ProjectConfig
-	for {
-		name := prompt(r, "  Project name: ")
-		if name == "" {
-			break
-		}
-
-		dir := prompt(r, "  Project directory: ")
-		if dir == "" {
-			printErr("Directory required, skipping.")
-			continue
-		}
-
-		// Expand ~
-		if strings.HasPrefix(dir, "~/") {
-			home, _ := os.UserHomeDir()
-			dir = filepath.Join(home, dir[2:])
-		}
-
-		// Resolve to absolute
-		if abs, err := filepath.Abs(dir); err == nil {
-			dir = abs
-		}
-
-		if info, err := os.Stat(dir); err != nil {
-			printWarn("Directory does not exist yet.")
-		} else if !info.IsDir() {
-			printWarn("Path is not a directory.")
-		} else {
-			printOK("Resolved: %s", dir)
-		}
-
-		provStr := prompt(r, "  Provider (claudecode/opencode) [claudecode]: ")
-		prov := "claudecode"
-		if strings.HasPrefix(strings.ToLower(provStr), "o") {
-			prov = "claudecode"
-		}
-
-		autoStr := prompt(r, "  Auto-start on boot? [y/N]: ")
-		autoStart := strings.HasPrefix(strings.ToLower(autoStr), "y")
-
-		projects = append(projects, config.ProjectConfig{
-			Name:      name,
-			Directory: dir,
-			AutoStart: autoStart,
-			Provider:  prov,
-		})
-		printOK("Added project '%s'", name)
-		fmt.Println()
-	}
-
-	fmt.Println()
-	return projects, nil
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -331,71 +223,21 @@ func printErr(format string, args ...any) {
 	fmt.Printf("  %s✗ %s%s\n", colorRed, fmt.Sprintf(format, args...), colorReset)
 }
 
-func printDone(cfgPath string) {
+func printDone() {
 	bin := os.Args[0]
 	fmt.Println(colorBold + colorGreen)
 	fmt.Println("  ┌──────────────────────────────────────┐")
 	fmt.Println("  │           Setup Complete!             │")
 	fmt.Println("  └──────────────────────────────────────┘")
 	fmt.Println(colorReset)
-	fmt.Printf("  Config written to: %s%s%s\n\n", colorCyan, cfgPath, colorReset)
+	fmt.Println("  Settings saved to database.")
+	fmt.Println()
 	fmt.Println("  " + colorBold + "Next steps:" + colorReset)
 	fmt.Println()
 	fmt.Printf("  1. Run:\n")
-	fmt.Printf("     %s%s -config %s%s\n\n", colorCyan, bin, cfgPath, colorReset)
+	fmt.Printf("     %s%s%s\n\n", colorCyan, bin, colorReset)
 	fmt.Printf("  2. Open Telegram and send %s/start%s to your bot.\n\n", colorCyan, colorReset)
 	fmt.Printf("  3. Create an instance:\n")
 	fmt.Printf("     %s/new myproject /path/to/project%s\n\n", colorCyan, colorReset)
 	fmt.Printf("  4. Send any message to prompt it!\n\n")
-}
-
-// ── Config template ────────────────────────────────────────────────────────
-
-type configData struct {
-	Token        string
-	Users        []int64
-	Binary       string
-	ClaudeBinary string
-	PortStart    int
-	PortEnd      int
-	DBPath       string
-	Projects     []config.ProjectConfig
-}
-
-var configTmpl = template.Must(template.New("config").Parse(`telegram:
-  token: "{{ .Token }}"
-  allowed_users: [{{ range $i, $u := .Users }}{{ if $i }}, {{ end }}{{ $u }}{{ end }}]
-
-process:
-  opencode_binary: "{{ .Binary }}"
-  claudecode_binary: "{{ .ClaudeBinary }}"
-  port_range:
-    start: {{ .PortStart }}
-    end: {{ .PortEnd }}
-  health_check_interval: 30s
-  max_restart_attempts: 3
-{{ if .Projects }}
-projects:{{ range .Projects }}
-  - name: "{{ .Name }}"
-    directory: "{{ .Directory }}"
-    provider: "{{ .Provider }}"
-    auto_start: {{ .AutoStart }}{{ end }}
-{{ else }}
-projects: []
-{{ end }}
-storage:
-  database: "{{ .DBPath }}"
-`))
-
-func writeConfig(path string, data configData) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-	if err != nil {
-		return fmt.Errorf("creating config file: %w", err)
-	}
-	defer f.Close()
-
-	if err := configTmpl.Execute(f, data); err != nil {
-		return fmt.Errorf("writing config: %w", err)
-	}
-	return nil
 }

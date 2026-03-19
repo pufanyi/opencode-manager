@@ -6,55 +6,41 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Telegram TelegramConfig  `yaml:"telegram"`
-	Process  ProcessConfig   `yaml:"process"`
-	Projects []ProjectConfig `yaml:"projects"`
-	Storage  StorageConfig   `yaml:"storage"`
-	Web      WebConfig       `yaml:"web"`
+	Telegram TelegramConfig
+	Process  ProcessConfig
+	Web      WebConfig
 }
 
 type WebConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Addr    string `yaml:"addr"`
+	Enabled bool
+	Addr    string
 }
 
 type TelegramConfig struct {
-	Token         string        `yaml:"token"`
-	AllowedUsers  []int64       `yaml:"allowed_users"`
-	BoardInterval time.Duration `yaml:"board_interval"`
+	Token         string
+	AllowedUsers  []int64
+	BoardInterval time.Duration
 }
 
 type ProcessConfig struct {
-	OpencodeBinary      string        `yaml:"opencode_binary"`
-	ClaudeCodeBinary    string        `yaml:"claudecode_binary"`
-	PortRange           PortRange     `yaml:"port_range"`
-	HealthCheckInterval time.Duration `yaml:"health_check_interval"`
-	MaxRestartAttempts  int           `yaml:"max_restart_attempts"`
+	OpencodeBinary      string
+	ClaudeCodeBinary    string
+	PortRange           PortRange
+	HealthCheckInterval time.Duration
+	MaxRestartAttempts  int
 }
 
 type PortRange struct {
-	Start int `yaml:"start"`
-	End   int `yaml:"end"`
+	Start int
+	End   int
 }
 
-type ProjectConfig struct {
-	Name      string `yaml:"name"`
-	Directory string `yaml:"directory"`
-	AutoStart bool   `yaml:"auto_start"`
-	Provider  string `yaml:"provider"` // "claudecode" (default) or "opencode"
-}
-
-type StorageConfig struct {
-	Database string `yaml:"database"`
-}
-
-func Load(path string) (*Config, error) {
-	cfg := &Config{
+// Defaults returns a Config with sensible default values.
+func Defaults() *Config {
+	return &Config{
 		Telegram: TelegramConfig{
 			BoardInterval: 2 * time.Second,
 		},
@@ -65,42 +51,85 @@ func Load(path string) (*Config, error) {
 			HealthCheckInterval: 30 * time.Second,
 			MaxRestartAttempts:  3,
 		},
-		Storage: StorageConfig{
-			Database: "./data/opencode-manager.db",
-		},
 	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading config file: %w", err)
-	}
-
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parsing config file: %w", err)
-	}
-
-	applyEnvOverrides(cfg)
-
-	if err := validate(cfg); err != nil {
-		return nil, fmt.Errorf("config validation: %w", err)
-	}
-
-	return cfg, nil
 }
 
-func applyEnvOverrides(cfg *Config) {
+// LoadFromSettings builds a Config from a key-value settings map (from DB).
+func LoadFromSettings(settings map[string]string) *Config {
+	cfg := Defaults()
+
+	if v, ok := settings["telegram.token"]; ok {
+		cfg.Telegram.Token = v
+	}
+	if v, ok := settings["telegram.allowed_users"]; ok {
+		cfg.Telegram.AllowedUsers = parseIntList(v)
+	}
+	if v, ok := settings["telegram.board_interval"]; ok {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Telegram.BoardInterval = d
+		}
+	}
+	if v, ok := settings["process.opencode_binary"]; ok {
+		cfg.Process.OpencodeBinary = v
+	}
+	if v, ok := settings["process.claudecode_binary"]; ok {
+		cfg.Process.ClaudeCodeBinary = v
+	}
+	if v, ok := settings["process.port_range_start"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Process.PortRange.Start = n
+		}
+	}
+	if v, ok := settings["process.port_range_end"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Process.PortRange.End = n
+		}
+	}
+	if v, ok := settings["process.health_check_interval"]; ok {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Process.HealthCheckInterval = d
+		}
+	}
+	if v, ok := settings["process.max_restart_attempts"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Process.MaxRestartAttempts = n
+		}
+	}
+	if v, ok := settings["web.enabled"]; ok {
+		cfg.Web.Enabled = v == "true"
+	}
+	if v, ok := settings["web.addr"]; ok {
+		cfg.Web.Addr = v
+	}
+
+	return cfg
+}
+
+// ToSettings converts a Config to a key-value settings map for DB storage.
+func (c *Config) ToSettings() map[string]string {
+	m := map[string]string{
+		"telegram.token":                c.Telegram.Token,
+		"telegram.allowed_users":        formatIntList(c.Telegram.AllowedUsers),
+		"telegram.board_interval":       c.Telegram.BoardInterval.String(),
+		"process.opencode_binary":       c.Process.OpencodeBinary,
+		"process.claudecode_binary":     c.Process.ClaudeCodeBinary,
+		"process.port_range_start":      strconv.Itoa(c.Process.PortRange.Start),
+		"process.port_range_end":        strconv.Itoa(c.Process.PortRange.End),
+		"process.health_check_interval": c.Process.HealthCheckInterval.String(),
+		"process.max_restart_attempts":  strconv.Itoa(c.Process.MaxRestartAttempts),
+		"web.enabled":                   strconv.FormatBool(c.Web.Enabled),
+		"web.addr":                      c.Web.Addr,
+	}
+	return m
+}
+
+// ApplyEnvOverrides applies environment variable overrides to the config.
+func ApplyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("TELEGRAM_TOKEN"); v != "" {
 		cfg.Telegram.Token = v
 	}
 	if v := os.Getenv("TELEGRAM_ALLOWED_USERS"); v != "" {
-		var users []int64
-		for _, s := range strings.Split(v, ",") {
-			s = strings.TrimSpace(s)
-			if id, err := strconv.ParseInt(s, 10, 64); err == nil {
-				users = append(users, id)
-			}
-		}
-		if len(users) > 0 {
+		if users := parseIntList(v); len(users) > 0 {
 			cfg.Telegram.AllowedUsers = users
 		}
 	}
@@ -110,12 +139,10 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("CLAUDECODE_BINARY"); v != "" {
 		cfg.Process.ClaudeCodeBinary = v
 	}
-	if v := os.Getenv("STORAGE_DATABASE"); v != "" {
-		cfg.Storage.Database = v
-	}
 }
 
-func validate(cfg *Config) error {
+// Validate checks that the config is valid.
+func Validate(cfg *Config) error {
 	if cfg.Telegram.Token == "" {
 		return fmt.Errorf("telegram.token is required")
 	}
@@ -129,4 +156,23 @@ func validate(cfg *Config) error {
 		return fmt.Errorf("port_range must be within 1024-65535")
 	}
 	return nil
+}
+
+func parseIntList(s string) []int64 {
+	var result []int64
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if id, err := strconv.ParseInt(part, 10, 64); err == nil {
+			result = append(result, id)
+		}
+	}
+	return result
+}
+
+func formatIntList(ids []int64) string {
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = strconv.FormatInt(id, 10)
+	}
+	return strings.Join(parts, ",")
 }
