@@ -1,40 +1,16 @@
 {
   "rules": {
-    "config": {
-      ".read": "auth != null",
-      ".write": "auth != null"
-    },
-    "instances": {
-      ".read": "auth != null",
-      ".write": "auth != null"
-    },
-    "streams": {
-      "$sessionId": {
-        ".read": "auth != null",
-        ".write": "auth != null"
-      }
-    },
-    "commands": {
-      "$instanceId": {
-        "$commandId": {
-          ".read": "auth != null",
-          ".write": "auth != null"
-        }
-      }
-    },
-    "presence": {
-      "$instanceId": {
-        ".read": "auth != null",
-        ".write": "auth != null"
+    "users": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
       }
     },
     "link_codes": {
-      ".read": "auth != null",
-      ".write": "auth != null"
-    },
-    "users": {
-      ".read": "auth != null",
-      ".write": "auth != null"
+      "$code": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
     }
   }
 }

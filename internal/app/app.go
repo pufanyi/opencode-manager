@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/pufanyi/opencode-manager/internal/bot"
@@ -18,7 +19,7 @@ import (
 
 type App struct {
 	cfg      *config.Config
-	store    *store.Store
+	store    store.Store
 	procMgr  *process.Manager
 	bot      *bot.Bot
 	web      *web.Server
@@ -26,10 +27,11 @@ type App struct {
 	devMode  bool
 }
 
-func New(cfg *config.Config, st *store.Store, devMode bool) (*App, error) {
+func New(cfg *config.Config, st store.Store, fbClient *firebase.Client, devMode bool) (*App, error) {
 	portPool := process.NewPortPool(cfg.Process.PortRange.Start, cfg.Process.PortRange.End)
 	procMgr := process.NewManager(
 		context.Background(),
+		fbClient.ClientID(),
 		cfg.Process.OpencodeBinary,
 		cfg.Process.ClaudeCodeBinary,
 		portPool,
@@ -38,7 +40,10 @@ func New(cfg *config.Config, st *store.Store, devMode bool) (*App, error) {
 		cfg.Process.MaxRestartAttempts,
 	)
 
-	tgBot, err := bot.New(&cfg.Telegram, procMgr, st)
+	// Create TelegramState for bot handlers.
+	tgState := firebase.NewTelegramState(fbClient.RTDB, fbClient.UID())
+
+	tgBot, err := bot.New(&cfg.Telegram, procMgr, st, tgState)
 	if err != nil {
 		return nil, err
 	}
@@ -48,30 +53,17 @@ func New(cfg *config.Config, st *store.Store, devMode bool) (*App, error) {
 	})
 
 	app := &App{
-		cfg:     cfg,
-		store:   st,
-		procMgr: procMgr,
-		bot:     tgBot,
-		devMode: devMode,
+		cfg:      cfg,
+		store:    st,
+		procMgr:  procMgr,
+		bot:      tgBot,
+		firebase: fbClient,
+		devMode:  devMode,
 	}
 
-	// Firebase integration (optional).
-	if cfg.Firebase.Enabled {
-		fbClient, err := firebase.NewClient(firebase.Config{
-			APIKey:       cfg.Firebase.APIKey,
-			DatabaseURL:  cfg.Firebase.DatabaseURL,
-			Email:        cfg.Firebase.Email,
-			Password:     cfg.Firebase.Password,
-			RefreshToken: cfg.Firebase.RefreshToken,
-		})
-		if err != nil {
-			slog.Error("firebase initialization failed (continuing without)", "error", err)
-		} else {
-			app.firebase = fbClient
-			app.bot.SetFirebase(fbClient)
-			procMgr.SetFirebaseStreamer(fbClient.Streamer)
-		}
-	}
+	// Firebase streamer for real-time events.
+	app.bot.SetFirebase(fbClient)
+	procMgr.SetFirebaseStreamer(fbClient.Streamer)
 
 	// In dev mode, force-enable web dashboard
 	if devMode && !cfg.Web.Enabled {
@@ -91,6 +83,16 @@ func New(cfg *config.Config, st *store.Store, devMode bool) (*App, error) {
 }
 
 func (a *App) Start(ctx context.Context) error {
+	// Register this client in Firestore.
+	hostname, _ := os.Hostname()
+	if err := a.store.RegisterClient(&store.ClientInfo{
+		ClientID:  a.firebase.ClientID(),
+		Hostname:  hostname,
+		StartedAt: time.Now(),
+	}); err != nil {
+		slog.Warn("failed to register client", "error", err)
+	}
+
 	if err := a.procMgr.RestoreInstances(); err != nil {
 		slog.Error("failed to restore instances", "error", err)
 	}
@@ -102,33 +104,15 @@ func (a *App) Start(ctx context.Context) error {
 	a.procMgr.StartHealthChecks()
 
 	// Start Firebase background services.
-	if a.firebase != nil {
-		var instanceIDs []string
-		for _, inst := range a.procMgr.ListInstances() {
-			instanceIDs = append(instanceIDs, inst.ID)
-		}
-
-		// Command handler for web frontend.
-		a.firebase.SetCommandHandler(a.handleFirebaseCommand)
-
-		a.firebase.StartBackground(ctx, instanceIDs)
-
-		// Sync instance list to RTDB periodically.
-		a.firebase.StartInstanceSync(ctx, func() []firebase.InstanceInfo {
-			instances := a.procMgr.ListInstances()
-			result := make([]firebase.InstanceInfo, len(instances))
-			for i, inst := range instances {
-				result[i] = firebase.InstanceInfo{
-					ID:           inst.ID,
-					Name:         inst.Name,
-					Directory:    inst.Directory,
-					Status:       string(inst.Status()),
-					ProviderType: string(inst.ProviderType),
-				}
-			}
-			return result
-		}, 2*time.Second)
+	var instanceIDs []string
+	for _, inst := range a.procMgr.ListInstances() {
+		instanceIDs = append(instanceIDs, inst.ID)
 	}
+
+	// Command handler for web frontend.
+	a.firebase.SetCommandHandler(a.handleFirebaseCommand)
+
+	a.firebase.StartBackground(ctx, instanceIDs)
 
 	// Start web dashboard
 	if a.web != nil {
@@ -173,18 +157,31 @@ func (a *App) handleFirebaseCommand(ctx context.Context, instanceID, commandID s
 		return map[string]string{"id": inst.ID, "status": "created"}, nil
 
 	case "start":
+		// Ownership check: only process instances owned by this client.
+		inst := a.procMgr.GetInstance(instanceID)
+		if inst != nil && inst.ClientID != "" && inst.ClientID != a.firebase.ClientID() {
+			return nil, fmt.Errorf("instance owned by different client")
+		}
 		if err := a.procMgr.StartInstance(instanceID); err != nil {
 			return nil, err
 		}
 		return map[string]string{"status": "started"}, nil
 
 	case "stop":
+		inst := a.procMgr.GetInstance(instanceID)
+		if inst != nil && inst.ClientID != "" && inst.ClientID != a.firebase.ClientID() {
+			return nil, fmt.Errorf("instance owned by different client")
+		}
 		if err := a.procMgr.StopInstance(instanceID); err != nil {
 			return nil, err
 		}
 		return map[string]string{"status": "stopped"}, nil
 
 	case "delete":
+		inst := a.procMgr.GetInstance(instanceID)
+		if inst != nil && inst.ClientID != "" && inst.ClientID != a.firebase.ClientID() {
+			return nil, fmt.Errorf("instance owned by different client")
+		}
 		if err := a.procMgr.DeleteInstance(instanceID); err != nil {
 			return nil, err
 		}
@@ -199,15 +196,40 @@ func (a *App) handleFirebaseCommand(ctx context.Context, instanceID, commandID s
 		if inst == nil {
 			return nil, fmt.Errorf("instance not found")
 		}
+		if inst.ClientID != "" && inst.ClientID != a.firebase.ClientID() {
+			return nil, fmt.Errorf("instance owned by different client")
+		}
 		ch, err := inst.Provider.Prompt(ctx, p.SessionID, p.Content)
 		if err != nil {
 			return nil, err
 		}
 		// Wrap with Firebase streaming.
 		ch = a.procMgr.WrapEventsIfFirebase(p.SessionID, ch)
-		// Consume events (streaming happens via the wrapper).
+		// Consume events, accumulate content, persist on completion.
 		go func() {
-			for range ch {
+			var textContent string
+			var toolCalls []store.ToolCall
+			for evt := range ch {
+				switch evt.Type {
+				case "text":
+					textContent = evt.Text
+				case "tool_use":
+					toolCalls = appendToolCall(toolCalls, evt)
+				}
+			}
+
+			// Save user message.
+			_ = a.store.SaveMessage(instanceID, p.SessionID, &store.Message{
+				Role:    "user",
+				Content: p.Content,
+			})
+			// Save assistant response.
+			if textContent != "" || len(toolCalls) > 0 {
+				_ = a.store.SaveMessage(instanceID, p.SessionID, &store.Message{
+					Role:      "assistant",
+					Content:   textContent,
+					ToolCalls: toolCalls,
+				})
 			}
 		}()
 		return map[string]string{"status": "started"}, nil
@@ -237,6 +259,24 @@ func (a *App) handleFirebaseCommand(ctx context.Context, instanceID, commandID s
 	default:
 		return nil, fmt.Errorf("unknown action: %s", cmd.Action)
 	}
+}
+
+// appendToolCall adds or updates a tool call entry from a stream event.
+func appendToolCall(calls []store.ToolCall, evt provider.StreamEvent) []store.ToolCall {
+	for i, tc := range calls {
+		if tc.Name == evt.ToolName && tc.Status == "running" {
+			calls[i].Status = evt.ToolState
+			if evt.ToolDetail != "" {
+				calls[i].Detail = evt.ToolDetail
+			}
+			return calls
+		}
+	}
+	return append(calls, store.ToolCall{
+		Name:   evt.ToolName,
+		Status: evt.ToolState,
+		Detail: evt.ToolDetail,
+	})
 }
 
 func (a *App) Shutdown() {

@@ -14,21 +14,26 @@ import (
 type Config struct {
 	APIKey       string
 	DatabaseURL  string
+	ProjectID    string // required for Firestore
 	Email        string // optional (email/password mode)
 	Password     string // optional (email/password mode)
 	RefreshToken string // optional (browser login mode)
+	ClientID     string // unique ID for this Go process
 }
 
 // Client is the main Firebase client for the Go server.
-// It ties together Auth, RTDB, Streamer, Presence, and CommandListener.
+// It ties together Auth, RTDB, Firestore, Streamer, Presence, and CommandListener.
 type Client struct {
-	Auth     *Auth
-	RTDB     *RTDB
-	Streamer *Streamer
-	Presence *Presence
-	Commands *CommandListener
+	Auth      *Auth
+	RTDB      *RTDB
+	Firestore *Firestore
+	Streamer  *Streamer
+	Presence  *Presence
+	Commands  *CommandListener
 
-	config Config
+	config   Config
+	uid      string // Firebase user ID (extracted from JWT)
+	clientID string // Unique ID for this Go process
 }
 
 // NewClient creates a Firebase client and signs in.
@@ -54,18 +59,41 @@ func NewClient(cfg Config) (*Client, error) {
 
 	rtdb := NewRTDB(cfg.DatabaseURL, auth)
 
+	var fs *Firestore
+	if cfg.ProjectID != "" {
+		fs = NewFirestore(cfg.ProjectID, auth)
+	}
+
+	uid := auth.UID()
+	if uid == "" {
+		return nil, fmt.Errorf("firebase: failed to extract UID from token")
+	}
+
 	return &Client{
-		Auth:     auth,
-		RTDB:     rtdb,
-		Streamer: NewStreamer(rtdb, 300*time.Millisecond),
-		Presence: NewPresence(rtdb, 30*time.Second),
-		config:   cfg,
+		Auth:      auth,
+		RTDB:      rtdb,
+		Firestore: fs,
+		Streamer:  NewStreamer(rtdb, uid, cfg.ClientID, 300*time.Millisecond),
+		Presence:  NewPresence(rtdb, uid, cfg.ClientID, 30*time.Second),
+		config:    cfg,
+		uid:       uid,
+		clientID:  cfg.ClientID,
 	}, nil
+}
+
+// UID returns the Firebase user ID.
+func (c *Client) UID() string {
+	return c.uid
+}
+
+// ClientID returns the unique client ID for this Go process.
+func (c *Client) ClientID() string {
+	return c.clientID
 }
 
 // SetCommandHandler registers the handler for web frontend commands.
 func (c *Client) SetCommandHandler(handler CommandHandler) {
-	c.Commands = NewCommandListener(c.RTDB, handler)
+	c.Commands = NewCommandListener(c.RTDB, c.uid, c.clientID, handler)
 }
 
 // StartBackground starts presence heartbeats and command listener.

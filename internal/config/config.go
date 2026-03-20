@@ -19,6 +19,7 @@ type FirebaseConfig struct {
 	Enabled      bool
 	APIKey       string
 	DatabaseURL  string
+	ProjectID    string // required for Firestore
 	Email        string // Go client email (email/password mode)
 	Password     string // Go client password (email/password mode)
 	RefreshToken string // Go client refresh token (browser login mode)
@@ -64,95 +65,84 @@ func Defaults() *Config {
 	}
 }
 
-// LoadFromSettings builds a Config from a key-value settings map (from DB).
-func LoadFromSettings(settings map[string]string) *Config {
+// LoadFromSettings builds a Config from user-level and client-level config maps.
+// userConfig holds shared settings (telegram token, allowed users, web config).
+// clientConfig holds per-client settings (binary paths, port ranges).
+// Either map may be nil.
+func LoadFromSettings(userConfig, clientConfig map[string]string) *Config {
 	cfg := Defaults()
 
-	if v, ok := settings["telegram.token"]; ok {
+	// User-level settings.
+	if v, ok := userConfig["telegram.token"]; ok {
 		cfg.Telegram.Token = v
 	}
-	if v, ok := settings["telegram.allowed_users"]; ok {
+	if v, ok := userConfig["telegram.allowed_users"]; ok {
 		cfg.Telegram.AllowedUsers = parseIntList(v)
 	}
-	if v, ok := settings["telegram.board_interval"]; ok {
+	if v, ok := userConfig["telegram.board_interval"]; ok {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.Telegram.BoardInterval = d
 		}
 	}
-	if v, ok := settings["process.opencode_binary"]; ok {
+	if v, ok := userConfig["web.enabled"]; ok {
+		cfg.Web.Enabled = v == "true"
+	}
+	if v, ok := userConfig["web.addr"]; ok {
+		cfg.Web.Addr = v
+	}
+
+	// Client-level settings.
+	if v, ok := clientConfig["process.opencode_binary"]; ok {
 		cfg.Process.OpencodeBinary = v
 	}
-	if v, ok := settings["process.claudecode_binary"]; ok {
+	if v, ok := clientConfig["process.claudecode_binary"]; ok {
 		cfg.Process.ClaudeCodeBinary = v
 	}
-	if v, ok := settings["process.port_range_start"]; ok {
+	if v, ok := clientConfig["process.port_range_start"]; ok {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Process.PortRange.Start = n
 		}
 	}
-	if v, ok := settings["process.port_range_end"]; ok {
+	if v, ok := clientConfig["process.port_range_end"]; ok {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Process.PortRange.End = n
 		}
 	}
-	if v, ok := settings["process.health_check_interval"]; ok {
+	if v, ok := clientConfig["process.health_check_interval"]; ok {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.Process.HealthCheckInterval = d
 		}
 	}
-	if v, ok := settings["process.max_restart_attempts"]; ok {
+	if v, ok := clientConfig["process.max_restart_attempts"]; ok {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Process.MaxRestartAttempts = n
 		}
-	}
-	if v, ok := settings["web.enabled"]; ok {
-		cfg.Web.Enabled = v == "true"
-	}
-	if v, ok := settings["web.addr"]; ok {
-		cfg.Web.Addr = v
-	}
-
-	// Firebase
-	if v, ok := settings["firebase.enabled"]; ok {
-		cfg.Firebase.Enabled = v == "true"
-	}
-	if v, ok := settings["firebase.api_key"]; ok {
-		cfg.Firebase.APIKey = v
-	}
-	if v, ok := settings["firebase.database_url"]; ok {
-		cfg.Firebase.DatabaseURL = v
-	}
-	if v, ok := settings["firebase.email"]; ok {
-		cfg.Firebase.Email = v
-	}
-	if v, ok := settings["firebase.password"]; ok {
-		cfg.Firebase.Password = v
 	}
 
 	return cfg
 }
 
-// ToSettings converts a Config to a key-value settings map for DB storage.
-func (c *Config) ToSettings() map[string]string {
-	m := map[string]string{
-		"telegram.token":                c.Telegram.Token,
-		"telegram.allowed_users":        formatIntList(c.Telegram.AllowedUsers),
-		"telegram.board_interval":       c.Telegram.BoardInterval.String(),
+// ToUserSettings returns the user-level settings map for Firestore storage.
+func (c *Config) ToUserSettings() map[string]string {
+	return map[string]string{
+		"telegram.token":          c.Telegram.Token,
+		"telegram.allowed_users":  formatIntList(c.Telegram.AllowedUsers),
+		"telegram.board_interval": c.Telegram.BoardInterval.String(),
+		"web.enabled":             strconv.FormatBool(c.Web.Enabled),
+		"web.addr":                c.Web.Addr,
+	}
+}
+
+// ToClientSettings returns the client-level settings map for Firestore storage.
+func (c *Config) ToClientSettings() map[string]string {
+	return map[string]string{
 		"process.opencode_binary":       c.Process.OpencodeBinary,
 		"process.claudecode_binary":     c.Process.ClaudeCodeBinary,
 		"process.port_range_start":      strconv.Itoa(c.Process.PortRange.Start),
 		"process.port_range_end":        strconv.Itoa(c.Process.PortRange.End),
 		"process.health_check_interval": c.Process.HealthCheckInterval.String(),
 		"process.max_restart_attempts":  strconv.Itoa(c.Process.MaxRestartAttempts),
-		"web.enabled":                   strconv.FormatBool(c.Web.Enabled),
-		"web.addr":                      c.Web.Addr,
-		"firebase.enabled":              strconv.FormatBool(c.Firebase.Enabled),
-		"firebase.api_key":              c.Firebase.APIKey,
-		"firebase.database_url":         c.Firebase.DatabaseURL,
-		"firebase.email":                c.Firebase.Email,
-		"firebase.password":             c.Firebase.Password,
 	}
-	return m
 }
 
 // ApplyEnvOverrides applies environment variable overrides to the config.
@@ -176,6 +166,9 @@ func ApplyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("FIREBASE_DATABASE_URL"); v != "" {
 		cfg.Firebase.DatabaseURL = v
+	}
+	if v := os.Getenv("FIREBASE_PROJECT_ID"); v != "" {
+		cfg.Firebase.ProjectID = v
 	}
 	if v := os.Getenv("FIREBASE_EMAIL"); v != "" {
 		cfg.Firebase.Email = v

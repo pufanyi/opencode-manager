@@ -10,17 +10,22 @@ import (
 )
 
 // Streamer buffers provider StreamEvents and flushes them to RTDB periodically.
+// Streams are written to users/{uid}/streams/{sessionId}.
 type Streamer struct {
 	rtdb          *RTDB
+	uid           string
+	clientID      string
 	flushInterval time.Duration
 }
 
-func NewStreamer(rtdb *RTDB, flushInterval time.Duration) *Streamer {
+func NewStreamer(rtdb *RTDB, uid, clientID string, flushInterval time.Duration) *Streamer {
 	if flushInterval <= 0 {
 		flushInterval = 300 * time.Millisecond
 	}
 	return &Streamer{
 		rtdb:          rtdb,
+		uid:           uid,
+		clientID:      clientID,
 		flushInterval: flushInterval,
 	}
 }
@@ -48,15 +53,17 @@ func (s *Streamer) WrapEvents(ctx context.Context, sessionID string, ch <-chan p
 }
 
 func (s *Streamer) streamSession(ctx context.Context, sessionID string, in <-chan provider.StreamEvent, out chan<- provider.StreamEvent) {
-	path := "streams/" + sessionID
+	path := StreamPath(s.uid, sessionID)
 	state := &streamState{}
 
 	// Initialize the stream node.
 	if err := s.rtdb.Set(ctx, path, map[string]interface{}{
-		"content":    "",
-		"status":     "streaming",
-		"tool_calls": []interface{}{},
-		"updated_at": time.Now().UnixMilli(),
+		"content":     "",
+		"status":      "streaming",
+		"tool_calls":  []interface{}{},
+		"instance_id": "",
+		"client_id":   s.clientID,
+		"updated_at":  time.Now().UnixMilli(),
 	}); err != nil {
 		slog.Warn("firebase: failed to init stream", "session", sessionID, "error", err)
 	}
@@ -173,7 +180,7 @@ func updateToolCalls(calls []map[string]interface{}, evt provider.StreamEvent) [
 
 // CleanupStream removes a stream node after it's no longer needed.
 func (s *Streamer) CleanupStream(ctx context.Context, sessionID string) {
-	if err := s.rtdb.Delete(ctx, "streams/"+sessionID); err != nil {
+	if err := s.rtdb.Delete(ctx, StreamPath(s.uid, sessionID)); err != nil {
 		slog.Warn("firebase: cleanup stream failed", "session", sessionID, "error", err)
 	}
 }

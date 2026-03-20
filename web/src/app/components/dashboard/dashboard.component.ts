@@ -25,8 +25,9 @@ export class DashboardComponent implements OnInit, OnDestroy {
   isLinked: boolean | null = null;
   linkCode: string | null = null;
 
-  private unsubInstances: Unsubscribe | null = null;
+  private uid: string | null = null;
   private unsubLinkStatus: Unsubscribe | null = null;
+  private instancePollTimer: ReturnType<typeof setInterval> | null = null;
   private userSub: Subscription | null = null;
 
   constructor(private firebase: FirebaseService) {}
@@ -40,6 +41,7 @@ export class DashboardComponent implements OnInit, OnDestroy {
       )
       .subscribe((user) => {
         if (!user) return; // false = no user, guard will redirect
+        this.uid = user.uid;
         this.unsubLinkStatus = this.firebase.onUserLinkStatus(user.uid, async (isLinked) => {
           this.isLinked = isLinked;
           if (!isLinked && !this.linkCode) {
@@ -50,15 +52,10 @@ export class DashboardComponent implements OnInit, OnDestroy {
             }
           }
 
-          // Start listening to instances only if linked
-          if (isLinked && !this.unsubInstances) {
-            this.unsubInstances = this.firebase.onInstances((instances) => {
-              this.instances = instances;
-              if (this.selectedInstance) {
-                const updated = instances.find((i) => i.id === this.selectedInstance!.id);
-                this.selectedInstance = updated || null;
-              }
-            });
+          // Start polling instances from Firestore if linked
+          if (isLinked && !this.instancePollTimer) {
+            this.loadInstances();
+            this.instancePollTimer = setInterval(() => this.loadInstances(), 5000);
           }
         });
       });
@@ -66,8 +63,24 @@ export class DashboardComponent implements OnInit, OnDestroy {
 
   ngOnDestroy() {
     this.userSub?.unsubscribe();
-    this.unsubInstances?.();
     this.unsubLinkStatus?.();
+    if (this.instancePollTimer) {
+      clearInterval(this.instancePollTimer);
+    }
+  }
+
+  private async loadInstances() {
+    if (!this.uid) return;
+    try {
+      const instances = await this.firebase.getInstances(this.uid);
+      this.instances = instances;
+      if (this.selectedInstance) {
+        const updated = instances.find((i) => i.id === this.selectedInstance!.id);
+        this.selectedInstance = updated || null;
+      }
+    } catch (e) {
+      console.error("Failed to load instances", e);
+    }
   }
 
   toggleNewForm(): void {
@@ -80,9 +93,9 @@ export class DashboardComponent implements OnInit, OnDestroy {
   }
 
   async createInstance() {
-    if (!this.newName.trim() || !this.newDirectory.trim()) return;
+    if (!this.newName.trim() || !this.newDirectory.trim() || !this.uid) return;
     try {
-      await this.firebase.sendCommandAndWait("_system", "create", {
+      await this.firebase.sendCommandAndWait(this.uid, "_system", "create", {
         name: this.newName.trim(),
         directory: this.newDirectory.trim(),
         provider: this.newProvider,
@@ -90,6 +103,7 @@ export class DashboardComponent implements OnInit, OnDestroy {
       this.showNewForm = false;
       this.newName = "";
       this.newDirectory = "";
+      await this.loadInstances();
     } catch (e) {
       console.error("Create failed:", e);
     }
@@ -100,18 +114,22 @@ export class DashboardComponent implements OnInit, OnDestroy {
   }
 
   async onStart(instance: Instance) {
-    await this.firebase.sendCommand(instance.id, "start");
+    if (!this.uid) return;
+    await this.firebase.sendCommand(this.uid, instance.id, "start");
   }
 
   async onStop(instance: Instance) {
-    await this.firebase.sendCommand(instance.id, "stop");
+    if (!this.uid) return;
+    await this.firebase.sendCommand(this.uid, instance.id, "stop");
   }
 
   async onDelete(instance: Instance) {
+    if (!this.uid) return;
     if (this.selectedInstance?.id === instance.id) {
       this.selectedInstance = null;
     }
-    await this.firebase.sendCommand(instance.id, "delete");
+    await this.firebase.sendCommand(this.uid, instance.id, "delete");
+    await this.loadInstances();
   }
 
   logout() {

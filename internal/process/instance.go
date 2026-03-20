@@ -21,6 +21,7 @@ type Instance struct {
 	Directory    string
 	Port         int
 	Password     string
+	ClientID     string // ID of the Go client that owns this instance
 	ProviderType provider.Type
 	Provider     provider.Provider
 

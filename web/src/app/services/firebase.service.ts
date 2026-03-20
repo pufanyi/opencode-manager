@@ -20,6 +20,14 @@ import {
   set,
   type Unsubscribe,
 } from "firebase/database";
+import {
+  collection,
+  type Firestore,
+  getDocs,
+  getFirestore,
+  orderBy,
+  query,
+} from "firebase/firestore";
 import { BehaviorSubject, type Observable } from "rxjs";
 import { environment } from "../../environments/environment";
 
@@ -29,10 +37,12 @@ export interface Instance {
   directory: string;
   status: string;
   provider_type: string;
+  client_id?: string;
 }
 
-export interface Presence {
+export interface InstanceRuntime {
   online: boolean;
+  client_id: string;
   last_seen: number;
 }
 
@@ -55,11 +65,20 @@ export interface Command {
   error?: string;
 }
 
+export interface HistoryMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  tool_calls: { name: string; status: string; detail: string; input?: string; output?: string }[];
+  created_at: string;
+}
+
 @Injectable({ providedIn: "root" })
 export class FirebaseService {
   private app: FirebaseApp;
   private auth: Auth;
   private db: Database;
+  private firestore: Firestore;
 
   // null = not yet checked, User | false = resolved
   private userSubject = new BehaviorSubject<User | null | false>(null);
@@ -69,6 +88,7 @@ export class FirebaseService {
     this.app = initializeApp(environment.firebase);
     this.auth = getAuth(this.app);
     this.db = getDatabase(this.app);
+    this.firestore = getFirestore(this.app);
 
     onAuthStateChanged(this.auth, (user) => {
       this.zone.run(() => this.userSubject.next(user ?? false));
@@ -79,7 +99,7 @@ export class FirebaseService {
     return this.auth.currentUser;
   }
 
-  // ── Auth ──
+  // -- Auth --
 
   async login(email: string, password: string): Promise<void> {
     await signInWithEmailAndPassword(this.auth, email, password);
@@ -97,7 +117,7 @@ export class FirebaseService {
     await signOut(this.auth);
   }
 
-  // ── Account Linking ──
+  // -- Account Linking --
 
   onUserLinkStatus(uid: string, callback: (isLinked: boolean) => void): Unsubscribe {
     const dbRef = ref(this.db, `users/${uid}/telegram_id`);
@@ -107,47 +127,70 @@ export class FirebaseService {
   }
 
   async generateLinkCode(uid: string): Promise<string> {
-    const code = Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit code
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
     const dbRef = ref(this.db, `link_codes/${code}`);
     await set(dbRef, {
       uid,
-      expires: Date.now() + 10 * 60 * 1000, // 10 minutes
+      expires: Date.now() + 10 * 60 * 1000,
     });
     return code;
   }
 
-  // ── RTDB Listeners ──
+  // -- Firestore: Instance List (user-scoped) --
 
-  onInstances(callback: (instances: Instance[]) => void): Unsubscribe {
-    const dbRef = ref(this.db, "instances");
-    return onValue(dbRef, (snapshot) => {
-      const data = snapshot.val();
-      const instances: Instance[] = data ? Object.values(data) : [];
-      instances.sort((a, b) => a.name.localeCompare(b.name));
-      this.zone.run(() => callback(instances));
+  async getInstances(uid: string): Promise<Instance[]> {
+    const instancesRef = collection(this.firestore, "users", uid, "instances");
+    const snapshot = await getDocs(instancesRef);
+    const instances: Instance[] = snapshot.docs.map((d) => {
+      const data = d.data();
+      return {
+        id: data["id"] || d.id,
+        name: data["name"] || "",
+        directory: data["directory"] || "",
+        status: data["status"] || "stopped",
+        provider_type: data["provider_type"] || "claudecode",
+        client_id: data["client_id"] || "",
+      } as Instance;
     });
+    instances.sort((a, b) => a.name.localeCompare(b.name));
+    return instances;
   }
 
-  onPresence(instanceId: string, callback: (presence: Presence | null) => void): Unsubscribe {
-    const dbRef = ref(this.db, `presence/${instanceId}`);
+  // -- RTDB: Instance Runtime (user-scoped presence) --
+
+  onInstanceRuntime(
+    uid: string,
+    instanceId: string,
+    callback: (runtime: InstanceRuntime | null) => void,
+  ): Unsubscribe {
+    const dbRef = ref(this.db, `users/${uid}/instances/${instanceId}/runtime`);
     return onValue(dbRef, (snapshot) => {
       this.zone.run(() => callback(snapshot.val()));
     });
   }
 
-  onStream(sessionId: string, callback: (data: StreamData | null) => void): Unsubscribe {
-    const dbRef = ref(this.db, `streams/${sessionId}`);
+  // -- RTDB: Streams (user-scoped) --
+
+  onStream(
+    uid: string,
+    sessionId: string,
+    callback: (data: StreamData | null) => void,
+  ): Unsubscribe {
+    const dbRef = ref(this.db, `users/${uid}/streams/${sessionId}`);
     return onValue(dbRef, (snapshot) => {
       this.zone.run(() => callback(snapshot.val()));
     });
   }
+
+  // -- RTDB: Commands (user-scoped) --
 
   onCommandResult(
+    uid: string,
     instanceId: string,
     commandId: string,
     callback: (cmd: Command) => void,
   ): Unsubscribe {
-    const dbRef = ref(this.db, `commands/${instanceId}/${commandId}`);
+    const dbRef = ref(this.db, `users/${uid}/commands/${instanceId}/${commandId}`);
     return onValue(dbRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
@@ -156,13 +199,16 @@ export class FirebaseService {
     });
   }
 
-  // ── Commands (Web → Go) ──
-
-  async sendCommand(instanceId: string, action: string, payload: unknown = {}): Promise<string> {
+  async sendCommand(
+    uid: string,
+    instanceId: string,
+    action: string,
+    payload: unknown = {},
+  ): Promise<string> {
     const user = this.currentUser;
     if (!user) throw new Error("Not authenticated");
 
-    const commandsRef = ref(this.db, `commands/${instanceId}`);
+    const commandsRef = ref(this.db, `users/${uid}/commands/${instanceId}`);
     const newRef = push(commandsRef);
     const commandId = newRef.key!;
 
@@ -179,14 +225,15 @@ export class FirebaseService {
   }
 
   async sendCommandAndWait(
+    uid: string,
     instanceId: string,
     action: string,
     payload: unknown = {},
   ): Promise<unknown> {
-    const commandId = await this.sendCommand(instanceId, action, payload);
+    const commandId = await this.sendCommand(uid, instanceId, action, payload);
 
     return new Promise((resolve, reject) => {
-      const unsub = this.onCommandResult(instanceId, commandId, (cmd) => {
+      const unsub = this.onCommandResult(uid, instanceId, commandId, (cmd) => {
         if (cmd.status === "done") {
           unsub();
           resolve(cmd.result);
@@ -196,11 +243,41 @@ export class FirebaseService {
         }
       });
 
-      // Timeout after 30 seconds.
       setTimeout(() => {
         unsub();
         reject(new Error("Command timeout"));
       }, 30000);
+    });
+  }
+
+  // -- Firestore: Message History (user-scoped, nested under instances/sessions) --
+
+  async getSessionHistory(
+    uid: string,
+    instanceId: string,
+    sessionId: string,
+  ): Promise<HistoryMessage[]> {
+    const messagesRef = collection(
+      this.firestore,
+      "users",
+      uid,
+      "instances",
+      instanceId,
+      "sessions",
+      sessionId,
+      "messages",
+    );
+    const q = query(messagesRef, orderBy("created_at", "asc"));
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map((d) => {
+      const data = d.data();
+      return {
+        id: data["id"] || d.id,
+        role: data["role"] || "user",
+        content: data["content"] || "",
+        tool_calls: data["tool_calls"] || [],
+        created_at: data["created_at"] || "",
+      } as HistoryMessage;
     });
   }
 }

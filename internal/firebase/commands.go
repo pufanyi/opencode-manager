@@ -26,25 +26,31 @@ type PromptPayload struct {
 type CommandHandler func(ctx context.Context, instanceID, commandID string, cmd Command) (interface{}, error)
 
 // CommandListener watches RTDB for new commands and dispatches them.
+// Listens on users/{uid}/commands via SSE.
 type CommandListener struct {
-	rtdb    *RTDB
-	handler CommandHandler
+	rtdb     *RTDB
+	uid      string
+	clientID string
+	handler  CommandHandler
 }
 
-func NewCommandListener(rtdb *RTDB, handler CommandHandler) *CommandListener {
+func NewCommandListener(rtdb *RTDB, uid, clientID string, handler CommandHandler) *CommandListener {
 	return &CommandListener{
-		rtdb:    rtdb,
-		handler: handler,
+		rtdb:     rtdb,
+		uid:      uid,
+		clientID: clientID,
+		handler:  handler,
 	}
 }
 
-// Listen watches all commands across all instances.
+// Listen watches all commands for this user.
 // Blocks until context is cancelled.
 func (cl *CommandListener) Listen(ctx context.Context) error {
 	events := make(chan SSEEvent, 32)
+	basePath := CommandsBasePath(cl.uid)
 
 	go func() {
-		if err := cl.rtdb.Listen(ctx, "commands", events); err != nil && ctx.Err() == nil {
+		if err := cl.rtdb.Listen(ctx, basePath, events); err != nil && ctx.Err() == nil {
 			slog.Error("firebase: command listener stopped", "error", err)
 		}
 	}()
@@ -73,8 +79,9 @@ func (cl *CommandListener) handleEvent(ctx context.Context, evt SSEEvent) {
 	commandID := parts[1]
 
 	// Read the full command to check status.
+	cmdPath := CommandPath(cl.uid, instanceID, commandID)
 	var cmd Command
-	if err := cl.rtdb.Get(ctx, "commands/"+instanceID+"/"+commandID, &cmd); err != nil {
+	if err := cl.rtdb.Get(ctx, cmdPath, &cmd); err != nil {
 		slog.Warn("firebase: failed to read command", "error", err)
 		return
 	}
@@ -83,10 +90,11 @@ func (cl *CommandListener) handleEvent(ctx context.Context, evt SSEEvent) {
 		return // Already processed
 	}
 
-	// Acknowledge.
-	if err := cl.rtdb.Update(ctx, "commands/"+instanceID+"/"+commandID, map[string]interface{}{
-		"status":     "ack",
-		"updated_at": time.Now().UnixMilli(),
+	// Acknowledge with client_id.
+	if err := cl.rtdb.Update(ctx, cmdPath, map[string]interface{}{
+		"status":             "ack",
+		"acked_by_client_id": cl.clientID,
+		"updated_at":         time.Now().UnixMilli(),
 	}); err != nil {
 		slog.Warn("firebase: failed to ack command", "error", err)
 	}
@@ -112,7 +120,7 @@ func (cl *CommandListener) handleEvent(ctx context.Context, evt SSEEvent) {
 		}
 	}
 
-	if err := cl.rtdb.Update(ctx, "commands/"+instanceID+"/"+commandID, update); err != nil {
+	if err := cl.rtdb.Update(ctx, cmdPath, update); err != nil {
 		slog.Warn("firebase: failed to update command status", "error", err)
 	}
 }

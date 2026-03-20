@@ -3,16 +3,18 @@ package bot
 import (
 	"context"
 	"fmt"
-	"github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
-	"github.com/pufanyi/opencode-manager/internal/gitops"
-	"github.com/pufanyi/opencode-manager/internal/provider"
-	"github.com/pufanyi/opencode-manager/internal/store"
 	"log/slog"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
+	"github.com/pufanyi/opencode-manager/internal/firebase"
+	"github.com/pufanyi/opencode-manager/internal/gitops"
+	"github.com/pufanyi/opencode-manager/internal/provider"
+	"github.com/pufanyi/opencode-manager/internal/store"
 )
 
 const (
@@ -42,8 +44,10 @@ type boardEntry struct {
 type StreamContext struct {
 	mu               sync.Mutex
 	b                *bot.Bot
-	store            *store.Store
+	store            store.Store
+	tgState          *firebase.TelegramState
 	chatID           int64
+	instanceID       string
 	sessionID        string
 	instanceName     string
 	sessionTitle     string
@@ -105,7 +109,7 @@ func NewStreamManager(boardInterval time.Duration) *StreamManager {
 	}
 }
 
-func (sm *StreamManager) StartStream(b *bot.Bot, st *store.Store, chatID int64, sessionID, instanceName, sessionTitle, workDir string, replyToMessageID int, ch <-chan provider.StreamEvent, promptCancel context.CancelFunc, abortFunc func()) *StreamContext {
+func (sm *StreamManager) StartStream(b *bot.Bot, st store.Store, tgState *firebase.TelegramState, chatID int64, instanceID, sessionID, instanceName, sessionTitle, workDir string, replyToMessageID int, ch <-chan provider.StreamEvent, promptCancel context.CancelFunc, abortFunc func()) *StreamContext {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	sm.mu.Lock()
@@ -121,7 +125,9 @@ func (sm *StreamManager) StartStream(b *bot.Bot, st *store.Store, chatID int64, 
 	sc := &StreamContext{
 		b:                b,
 		store:            st,
+		tgState:          tgState,
 		chatID:           chatID,
+		instanceID:       instanceID,
 		sessionID:        sessionID,
 		instanceName:     instanceName,
 		sessionTitle:     sessionTitle,
@@ -137,7 +143,7 @@ func (sm *StreamManager) StartStream(b *bot.Bot, st *store.Store, chatID int64, 
 
 	// Look up session location for board display
 	if st != nil {
-		if cs, err := st.GetClaudeSession(sessionID); err == nil && cs != nil {
+		if cs, err := st.GetClaudeSession(instanceID, sessionID); err == nil && cs != nil {
 			if cs.Branch != "" {
 				sc.location = "🌿 worktree"
 			} else {
@@ -179,6 +185,22 @@ func (sc *StreamContext) OnDone(fn func()) {
 	sc.mu.Lock()
 	sc.onDoneCallbacks = append(sc.onDoneCallbacks, fn)
 	sc.mu.Unlock()
+}
+
+// Result returns the accumulated response text and tool calls.
+// Safe to call from OnDone callbacks (lock is not held).
+func (sc *StreamContext) Result() (text string, tools []store.ToolCall) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	result := make([]store.ToolCall, len(sc.tools))
+	for i, t := range sc.tools {
+		result[i] = store.ToolCall{
+			Name:   t.Name,
+			Status: t.State,
+			Detail: t.Detail,
+		}
+	}
+	return sc.textContent, result
 }
 
 // MarkSuperseded marks this stream as replaced by a newer one. Its OnDone
@@ -516,8 +538,8 @@ func (sc *StreamContext) sendSingleMessage(fullContent, rawContent string, semap
 		}
 	}
 
-	if sc.store != nil && msg != nil {
-		_ = sc.store.SetMessageSession(sc.chatID, msg.ID, sc.sessionID)
+	if sc.tgState != nil && msg != nil {
+		_ = sc.tgState.SetMessageSession(context.Background(), sc.chatID, msg.ID, sc.sessionID)
 	}
 	sc.manager.NotifyNewMessage(sc.chatID)
 }
@@ -551,8 +573,8 @@ func (sc *StreamContext) sendSplitResponse(fullContent, rawContent, header strin
 		sc.sendAsFile(rawContent)
 		return
 	}
-	if sc.store != nil {
-		_ = sc.store.SetMessageSession(sc.chatID, msg.ID, sc.sessionID)
+	if sc.tgState != nil {
+		_ = sc.tgState.SetMessageSession(context.Background(), sc.chatID, msg.ID, sc.sessionID)
 	}
 
 	// Continuation
@@ -577,8 +599,8 @@ func (sc *StreamContext) sendSplitResponse(fullContent, rawContent, header strin
 		slog.Warn("send continuation failed", "error", err)
 		return
 	}
-	if sc.store != nil {
-		_ = sc.store.SetMessageSession(sc.chatID, msg2.ID, sc.sessionID)
+	if sc.tgState != nil {
+		_ = sc.tgState.SetMessageSession(context.Background(), sc.chatID, msg2.ID, sc.sessionID)
 	}
 	sc.manager.NotifyNewMessage(sc.chatID)
 }

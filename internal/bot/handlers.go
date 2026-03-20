@@ -37,19 +37,21 @@ type pendingPrompt struct {
 
 type Handlers struct {
 	procMgr   *process.Manager
-	store     *store.Store
+	store     store.Store
 	streamMgr *StreamManager
 	firebase  *firebase.Client
+	tgState   *firebase.TelegramState
 
 	pendingMu      sync.Mutex
 	pendingPrompts map[int64]*pendingPrompt // userID -> pending
 }
 
-func NewHandlers(procMgr *process.Manager, st *store.Store, streamMgr *StreamManager) *Handlers {
+func NewHandlers(procMgr *process.Manager, st store.Store, streamMgr *StreamManager, tgState *firebase.TelegramState) *Handlers {
 	return &Handlers{
 		procMgr:        procMgr,
 		store:          st,
 		streamMgr:      streamMgr,
+		tgState:        tgState,
 		pendingPrompts: make(map[int64]*pendingPrompt),
 	}
 }
@@ -173,7 +175,7 @@ func (h *Handlers) handleNewInstance(ctx context.Context, b *bot.Bot, update *mo
 	}
 
 	userID := update.Message.From.ID
-	_ = h.store.SetActiveInstance(userID, inst.ID)
+	_ = h.tgState.SetActiveInstance(ctx, userID, inst.ID)
 
 	label := "OpenCode"
 	if provType == provider.TypeClaudeCode {
@@ -252,7 +254,7 @@ func (h *Handlers) HandleSwitch(ctx context.Context, b *bot.Bot, update *models.
 		return
 	}
 
-	_ = h.store.SetActiveInstance(update.Message.From.ID, inst.ID)
+	_ = h.tgState.SetActiveInstance(ctx, update.Message.From.ID, inst.ID)
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
@@ -270,7 +272,7 @@ func (h *Handlers) HandleStop(ctx context.Context, b *bot.Bot, update *models.Up
 	if len(parts) >= 2 {
 		inst = h.procMgr.GetInstanceByName(parts[1])
 	} else {
-		state, _ := h.store.GetUserState(userID)
+		state, _ := h.tgState.GetUserState(ctx, userID)
 		if state != nil && state.ActiveInstanceID != "" {
 			inst = h.procMgr.GetInstance(state.ActiveInstanceID)
 		}
@@ -292,7 +294,7 @@ func (h *Handlers) HandleStop(ctx context.Context, b *bot.Bot, update *models.Up
 		return
 	}
 
-	_ = h.store.ClearUserState(userID, inst.ID)
+	_ = h.tgState.ClearUserState(ctx, userID, inst.ID)
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
@@ -346,7 +348,7 @@ func (h *Handlers) HandleStartInst(ctx context.Context, b *bot.Bot, update *mode
 
 func (h *Handlers) HandleStatus(ctx context.Context, b *bot.Bot, update *models.Update) {
 	userID := update.Message.From.ID
-	state, _ := h.store.GetUserState(userID)
+	state, _ := h.tgState.GetUserState(ctx, userID)
 
 	if state == nil || state.ActiveInstanceID == "" {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
@@ -372,7 +374,7 @@ func (h *Handlers) HandleStatus(ctx context.Context, b *bot.Bot, update *models.
 
 	sessionInfo := "none"
 	if state.ActiveSessionID != "" {
-		cs, _ := h.store.GetClaudeSession(state.ActiveSessionID)
+		cs, _ := h.store.GetClaudeSession(state.ActiveInstanceID, state.ActiveSessionID)
 		if cs != nil && cs.Title != "" {
 			sessionInfo = fmt.Sprintf("%s (%d msgs)", cs.Title, cs.MessageCount)
 		} else {
@@ -392,7 +394,7 @@ func (h *Handlers) HandleStatus(ctx context.Context, b *bot.Bot, update *models.
 
 func (h *Handlers) HandleSession(ctx context.Context, b *bot.Bot, update *models.Update) {
 	userID := update.Message.From.ID
-	inst, err := h.getActiveInstance(userID)
+	inst, err := h.getActiveInstance(ctx, userID)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: err.Error()})
 		return
@@ -414,7 +416,7 @@ func (h *Handlers) HandleSession(ctx context.Context, b *bot.Bot, update *models
 			return
 		}
 
-		_ = h.store.SetActiveSession(userID, session.ID)
+		_ = h.tgState.SetActiveSession(ctx, userID, session.ID)
 
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    update.Message.Chat.ID,
@@ -424,7 +426,7 @@ func (h *Handlers) HandleSession(ctx context.Context, b *bot.Bot, update *models
 		return
 	}
 
-	state, _ := h.store.GetUserState(userID)
+	state, _ := h.tgState.GetUserState(ctx, userID)
 	if state.ActiveSessionID == "" {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    update.Message.Chat.ID,
@@ -434,7 +436,7 @@ func (h *Handlers) HandleSession(ctx context.Context, b *bot.Bot, update *models
 		return
 	}
 
-	cs, err := h.store.GetClaudeSession(state.ActiveSessionID)
+	cs, err := h.store.GetClaudeSession(inst.ID, state.ActiveSessionID)
 	if err != nil || cs == nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
@@ -464,9 +466,9 @@ func (h *Handlers) HandleSession(ctx context.Context, b *bot.Bot, update *models
 
 func (h *Handlers) HandleSessions(ctx context.Context, b *bot.Bot, update *models.Update) {
 	userID := update.Message.From.ID
-	state, _ := h.store.GetUserState(userID)
+	state, _ := h.tgState.GetUserState(ctx, userID)
 
-	inst, err := h.getActiveInstance(userID)
+	inst, err := h.getActiveInstance(ctx, userID)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: err.Error()})
 		return
@@ -534,13 +536,13 @@ func (h *Handlers) HandleSessions(ctx context.Context, b *bot.Bot, update *model
 
 func (h *Handlers) HandleAbort(ctx context.Context, b *bot.Bot, update *models.Update) {
 	userID := update.Message.From.ID
-	inst, err := h.getActiveInstance(userID)
+	inst, err := h.getActiveInstance(ctx, userID)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: err.Error()})
 		return
 	}
 
-	state, _ := h.store.GetUserState(userID)
+	state, _ := h.tgState.GetUserState(ctx, userID)
 	if state.ActiveSessionID == "" {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: "No active session."})
 		return
@@ -568,7 +570,7 @@ func (h *Handlers) HandlePrompt(ctx context.Context, b *bot.Bot, update *models.
 	chatID := update.Message.Chat.ID
 	text := update.Message.Text
 
-	inst, err := h.getActiveInstance(userID)
+	inst, err := h.getActiveInstance(ctx, userID)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: err.Error()})
 		return
@@ -576,16 +578,16 @@ func (h *Handlers) HandlePrompt(ctx context.Context, b *bot.Bot, update *models.
 
 	// Try to continue existing session from reply
 	if update.Message.ReplyToMessage != nil {
-		if sessionID, _ := h.store.GetSessionByMessage(chatID, update.Message.ReplyToMessage.ID); sessionID != "" {
+		if sessionID, _ := h.tgState.GetSessionByMessage(ctx, chatID, update.Message.ReplyToMessage.ID); sessionID != "" {
 			// Check main-dir busy for main-dir sessions
-			cs, _ := h.store.GetClaudeSession(sessionID)
+			cs, _ := h.store.GetClaudeSession(inst.ID, sessionID)
 			if cs != nil && cs.WorktreePath == "" {
 				if locker, ok := inst.Provider.(provider.MainDirLocker); ok && locker.IsMainDirBusy(sessionID) {
 					h.showMainDirConflict(ctx, b, inst, userID, chatID, update.Message.ID, text, text, sessionID, nil)
 					return
 				}
 			}
-			_ = h.store.SetActiveSession(userID, sessionID)
+			_ = h.tgState.SetActiveSession(ctx, userID, sessionID)
 			title := ""
 			if cs != nil {
 				title = cs.Title
@@ -610,7 +612,7 @@ func (h *Handlers) HandlePhoto(ctx context.Context, b *bot.Bot, update *models.U
 	chatID := update.Message.Chat.ID
 	caption := update.Message.Caption
 
-	inst, err := h.getActiveInstance(userID)
+	inst, err := h.getActiveInstance(ctx, userID)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: err.Error()})
 		return
@@ -623,9 +625,9 @@ func (h *Handlers) HandlePhoto(ctx context.Context, b *bot.Bot, update *models.U
 
 	// Try to continue existing session from reply
 	if update.Message.ReplyToMessage != nil {
-		if sessionID, _ := h.store.GetSessionByMessage(chatID, update.Message.ReplyToMessage.ID); sessionID != "" {
+		if sessionID, _ := h.tgState.GetSessionByMessage(ctx, chatID, update.Message.ReplyToMessage.ID); sessionID != "" {
 			// Check main-dir busy for main-dir sessions
-			cs, _ := h.store.GetClaudeSession(sessionID)
+			cs, _ := h.store.GetClaudeSession(inst.ID, sessionID)
 			if cs != nil && cs.WorktreePath == "" {
 				if locker, ok := inst.Provider.(provider.MainDirLocker); ok && locker.IsMainDirBusy(sessionID) {
 					localPath, prompt, photoErr := h.buildPhotoPrompt(ctx, b, update, inst, caption)
@@ -637,7 +639,7 @@ func (h *Handlers) HandlePhoto(ctx context.Context, b *bot.Bot, update *models.U
 					return
 				}
 			}
-			_ = h.store.SetActiveSession(userID, sessionID)
+			_ = h.tgState.SetActiveSession(ctx, userID, sessionID)
 			title := ""
 			if cs != nil {
 				title = cs.Title
@@ -804,13 +806,13 @@ func (h *Handlers) createSessionAndPrompt(ctx context.Context, b *bot.Bot, inst 
 		}
 		return
 	}
-	_ = h.store.SetActiveSession(userID, session.ID)
+	_ = h.tgState.SetActiveSession(ctx, userID, session.ID)
 
 	title := titleHint
 	if len(title) > 60 {
 		title = truncateUTF8(title, 60) + "..."
 	}
-	_ = h.store.UpdateClaudeSessionTitle(session.ID, title)
+	_ = h.store.UpdateClaudeSessionTitle(inst.ID, session.ID, title)
 
 	h.startPrompt(ctx, b, inst, chatID, session.ID, title, text, replyMsgID, cleanupFiles)
 }
@@ -819,13 +821,13 @@ func (h *Handlers) createSessionAndPrompt(ctx context.Context, b *bot.Bot, inst 
 // It acquires the main-dir lock for main-dir sessions and registers a
 // release callback on the stream.
 func (h *Handlers) startPrompt(ctx context.Context, b *bot.Bot, inst *process.Instance, chatID int64, sessionID, sessionTitle, text string, replyMsgID int, cleanupFiles []string) {
-	_ = h.store.UpdateClaudeSessionActivity(sessionID)
-	_ = h.store.SetMessageSession(chatID, replyMsgID, sessionID)
+	_ = h.store.UpdateClaudeSessionActivity(inst.ID, sessionID)
+	_ = h.tgState.SetMessageSession(ctx, chatID, replyMsgID, sessionID)
 
 	// Acquire main-dir lock if this is a main-dir session.
 	var releaseFunc func()
 	if locker, ok := inst.Provider.(provider.MainDirLocker); ok {
-		cs, _ := h.store.GetClaudeSession(sessionID)
+		cs, _ := h.store.GetClaudeSession(inst.ID, sessionID)
 		if cs != nil && cs.WorktreePath == "" {
 			if !locker.TryAcquireMainDir(sessionID) {
 				slog.Warn("main dir busy at startPrompt (race)", "session", sessionID)
@@ -858,13 +860,33 @@ func (h *Handlers) startPrompt(ctx context.Context, b *bot.Bot, inst *process.In
 	ch = h.procMgr.WrapEventsIfFirebase(sessionID, ch)
 
 	abortFunc := func() { _ = inst.Provider.Abort(context.Background(), sessionID) }
-	sc := h.streamMgr.StartStream(b, h.store, chatID, sessionID, inst.Name, sessionTitle, inst.Directory, replyMsgID, ch, promptCancel, abortFunc)
+	sc := h.streamMgr.StartStream(b, h.store, h.tgState, chatID, inst.ID, sessionID, inst.Name, sessionTitle, inst.Directory, replyMsgID, ch, promptCancel, abortFunc)
 	for _, f := range cleanupFiles {
 		sc.AddCleanupFile(f)
 	}
 	if releaseFunc != nil {
 		sc.OnDone(releaseFunc)
 	}
+
+	// Persist conversation history.
+	promptText := text
+	instID := inst.ID
+	sc.OnDone(func() {
+		// Save user message.
+		_ = h.store.SaveMessage(instID, sessionID, &store.Message{
+			Role:    "user",
+			Content: promptText,
+		})
+		// Save assistant response.
+		responseText, toolCalls := sc.Result()
+		if responseText != "" || len(toolCalls) > 0 {
+			_ = h.store.SaveMessage(instID, sessionID, &store.Message{
+				Role:      "assistant",
+				Content:   responseText,
+				ToolCalls: toolCalls,
+			})
+		}
+	})
 }
 
 // showMainDirConflict stores a pending prompt and shows the main-dir conflict keyboard.
@@ -924,7 +946,7 @@ func (h *Handlers) queueMainDirPrompt(b *bot.Bot, pp *pendingPrompt) {
 		// No locking support — just proceed immediately
 		if pp.sessionID != "" {
 			title := pp.titleHint
-			if cs, _ := h.store.GetClaudeSession(pp.sessionID); cs != nil && cs.Title != "" {
+			if cs, _ := h.store.GetClaudeSession(pp.inst.ID, pp.sessionID); cs != nil && cs.Title != "" {
 				title = cs.Title
 			}
 			h.startPrompt(context.Background(), b, pp.inst, pp.chatID, pp.sessionID, title, pp.text, pp.replyMsgID, pp.cleanupFiles)
@@ -950,7 +972,7 @@ func (h *Handlers) queueMainDirPrompt(b *bot.Bot, pp *pendingPrompt) {
 				if !locker.IsMainDirBusy(sid) {
 					if pp.sessionID != "" {
 						title := pp.titleHint
-						if cs, _ := h.store.GetClaudeSession(pp.sessionID); cs != nil && cs.Title != "" {
+						if cs, _ := h.store.GetClaudeSession(pp.inst.ID, pp.sessionID); cs != nil && cs.Title != "" {
 							title = cs.Title
 						}
 						h.startPrompt(context.Background(), b, pp.inst, pp.chatID, pp.sessionID, title, pp.text, pp.replyMsgID, pp.cleanupFiles)
@@ -976,8 +998,8 @@ func (h *Handlers) queueMainDirPrompt(b *bot.Bot, pp *pendingPrompt) {
 }
 
 // getActiveInstance returns the active instance for a user.
-func (h *Handlers) getActiveInstance(userID int64) (*process.Instance, error) {
-	state, err := h.store.GetUserState(userID)
+func (h *Handlers) getActiveInstance(ctx context.Context, userID int64) (*process.Instance, error) {
+	state, err := h.tgState.GetUserState(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user state: %s", err)
 	}
