@@ -9,7 +9,12 @@ import {
 } from "@angular/core";
 import { FormsModule } from "@angular/forms";
 import type { Unsubscribe } from "firebase/database";
-import { FirebaseService, type HistoryMessage, type Instance, type StreamData } from "../../services/firebase.service";
+import {
+  FirebaseService,
+  type HistoryMessage,
+  type Instance,
+  type StreamData,
+} from "../../services/firebase.service";
 
 interface Session {
   ID: string;
@@ -72,7 +77,11 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
   async loadSessions() {
     if (!this.instance || !this.uid) return;
     try {
-      const result = await this.firebase.sendCommandAndWait(this.uid, this.instance.id, "list_sessions");
+      const result = await this.firebase.sendCommandAndWait(
+        this.uid,
+        this.instance.id,
+        "list_sessions",
+      );
       this.sessions = (result as Session[]) ?? [];
       if (this.sessions.length > 0 && !this.selectedSessionId) {
         this.selectedSessionId = this.sessions[0].ID;
@@ -86,7 +95,11 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
   async createSession() {
     if (!this.instance || !this.uid) return;
     try {
-      const result = await this.firebase.sendCommandAndWait(this.uid, this.instance.id, "create_session");
+      const result = await this.firebase.sendCommandAndWait(
+        this.uid,
+        this.instance.id,
+        "create_session",
+      );
       const session = result as Session;
       this.sessions = [...this.sessions, session];
       this.selectedSessionId = session.ID;

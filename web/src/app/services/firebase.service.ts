@@ -21,8 +21,8 @@ import {
   type Unsubscribe,
 } from "firebase/database";
 import {
-  type Firestore,
   collection,
+  type Firestore,
   getDocs,
   getFirestore,
   orderBy,
@@ -158,7 +158,11 @@ export class FirebaseService {
 
   // -- RTDB: Instance Runtime (user-scoped presence) --
 
-  onInstanceRuntime(uid: string, instanceId: string, callback: (runtime: InstanceRuntime | null) => void): Unsubscribe {
+  onInstanceRuntime(
+    uid: string,
+    instanceId: string,
+    callback: (runtime: InstanceRuntime | null) => void,
+  ): Unsubscribe {
     const dbRef = ref(this.db, `users/${uid}/instances/${instanceId}/runtime`);
     return onValue(dbRef, (snapshot) => {
       this.zone.run(() => callback(snapshot.val()));
@@ -167,7 +171,11 @@ export class FirebaseService {
 
   // -- RTDB: Streams (user-scoped) --
 
-  onStream(uid: string, sessionId: string, callback: (data: StreamData | null) => void): Unsubscribe {
+  onStream(
+    uid: string,
+    sessionId: string,
+    callback: (data: StreamData | null) => void,
+  ): Unsubscribe {
     const dbRef = ref(this.db, `users/${uid}/streams/${sessionId}`);
     return onValue(dbRef, (snapshot) => {
       this.zone.run(() => callback(snapshot.val()));
@@ -191,7 +199,12 @@ export class FirebaseService {
     });
   }
 
-  async sendCommand(uid: string, instanceId: string, action: string, payload: unknown = {}): Promise<string> {
+  async sendCommand(
+    uid: string,
+    instanceId: string,
+    action: string,
+    payload: unknown = {},
+  ): Promise<string> {
     const user = this.currentUser;
     if (!user) throw new Error("Not authenticated");
 
@@ -239,12 +252,19 @@ export class FirebaseService {
 
   // -- Firestore: Message History (user-scoped, nested under instances/sessions) --
 
-  async getSessionHistory(uid: string, instanceId: string, sessionId: string): Promise<HistoryMessage[]> {
+  async getSessionHistory(
+    uid: string,
+    instanceId: string,
+    sessionId: string,
+  ): Promise<HistoryMessage[]> {
     const messagesRef = collection(
       this.firestore,
-      "users", uid,
-      "instances", instanceId,
-      "sessions", sessionId,
+      "users",
+      uid,
+      "instances",
+      instanceId,
+      "sessions",
+      sessionId,
       "messages",
     );
     const q = query(messagesRef, orderBy("created_at", "asc"));
