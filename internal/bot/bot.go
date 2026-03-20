@@ -19,9 +19,9 @@ type Bot struct {
 	cfg      *config.TelegramConfig
 }
 
-func New(cfg *config.TelegramConfig, procMgr *process.Manager, st store.Store) (*Bot, error) {
+func New(cfg *config.TelegramConfig, procMgr *process.Manager, st store.Store, tgState *firebase.TelegramState) (*Bot, error) {
 	streamMgr := NewStreamManager(cfg.BoardInterval)
-	handlers := NewHandlers(procMgr, st, streamMgr)
+	handlers := NewHandlers(procMgr, st, streamMgr, tgState)
 
 	allowedUsers := make(map[int64]bool)
 	for _, id := range cfg.AllowedUsers {

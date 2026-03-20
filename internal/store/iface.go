@@ -13,6 +13,7 @@ type Instance struct {
 	Status       string
 	AutoStart    bool
 	ProviderType string
+	ClientID     string // ID of the Go client that owns this instance
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
@@ -28,15 +29,17 @@ type ClaudeSession struct {
 	Branch       string
 }
 
-type UserState struct {
-	UserID           int64
-	ActiveInstanceID string
-	ActiveSessionID  string
+// ClientInfo represents a registered Go client process.
+type ClientInfo struct {
+	ClientID  string
+	Hostname  string
+	StartedAt time.Time
 }
 
 // ── Store interface ─────────────────────────────────────────────────────────
 
 // Store is the persistence interface for all application data.
+// All paths are user-scoped (under users/{uid}/ in Firestore).
 type Store interface {
 	// ── Instances ──
 
@@ -45,44 +48,38 @@ type Store interface {
 	GetInstanceByName(name string) (*Instance, error)
 	ListInstances() ([]*Instance, error)
 	GetRunningInstances() ([]*Instance, error)
+	GetInstancesByClient(clientID string) ([]*Instance, error)
 	UpdateInstanceStatus(id, status string) error
 	UpdateInstancePort(id string, port int) error
 	DeleteInstance(id string) error
 
-	// ── Sessions ──
+	// ── Sessions (nested under instances) ──
 
 	CreateClaudeSession(instanceID, sessionID, title, worktreePath, branch string) error
-	GetClaudeSession(sessionID string) (*ClaudeSession, error)
+	GetClaudeSession(instanceID, sessionID string) (*ClaudeSession, error)
 	ListClaudeSessions(instanceID string) ([]ClaudeSession, error)
-	UpdateClaudeSessionTitle(sessionID, title string) error
-	UpdateClaudeSessionActivity(sessionID string) error
-	DeleteClaudeSession(sessionID string) error
+	UpdateClaudeSessionTitle(instanceID, sessionID, title string) error
+	UpdateClaudeSessionActivity(instanceID, sessionID string) error
+	DeleteClaudeSession(instanceID, sessionID string) error
 
-	// ── User State (Telegram) ──
+	// ── Client Registration ──
 
-	GetUserState(userID int64) (*UserState, error)
-	SetActiveInstance(userID int64, instanceID string) error
-	SetActiveSession(userID int64, sessionID string) error
-	ClearUserState(userID int64, instanceID string) error
+	RegisterClient(info *ClientInfo) error
 
-	// ── Message Sessions (Telegram message → session mapping) ──
+	// ── User Config (Firestore) ──
 
-	SetMessageSession(chatID int64, messageID int, sessionID string) error
-	GetSessionByMessage(chatID int64, messageID int) (string, error)
+	GetUserConfig() (map[string]string, error)
+	SetUserConfig(config map[string]string) error
 
-	// ── Settings ──
+	// ── Client Config (Firestore) ──
 
-	GetSetting(key string) (string, bool, error)
-	SetSetting(key, value string) error
-	DeleteSetting(key string) error
-	GetAllSettings() (map[string]string, error)
-	HasSettings() (bool, error)
-	SetSettings(settings map[string]string) error
+	GetClientConfig(clientID string) (map[string]string, error)
+	SetClientConfig(clientID string, config map[string]string) error
 
-	// ── Message History ──
+	// ── Message History (nested under instances/sessions) ──
 
-	SaveMessage(sessionID string, msg *Message) error
-	ListMessages(sessionID string) ([]*Message, error)
+	SaveMessage(instanceID, sessionID string, msg *Message) error
+	ListMessages(instanceID, sessionID string) ([]*Message, error)
 
 	// ── Lifecycle ──
 

@@ -72,7 +72,7 @@ func (h *Handlers) callbackSwitch(ctx context.Context, b *bot.Bot, chatID int64,
 		return
 	}
 
-	_ = h.store.SetActiveInstance(userID, instanceID)
+	_ = h.tgState.SetActiveInstance(ctx, userID, instanceID)
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
@@ -93,7 +93,7 @@ func (h *Handlers) callbackStop(ctx context.Context, b *bot.Bot, chatID int64, u
 		return
 	}
 
-	_ = h.store.ClearUserState(userID, instanceID)
+	_ = h.tgState.ClearUserState(ctx, userID, instanceID)
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
@@ -140,7 +140,7 @@ func (h *Handlers) callbackDelete(ctx context.Context, b *bot.Bot, chatID int64,
 		return
 	}
 
-	_ = h.store.ClearUserState(userID, instanceID)
+	_ = h.tgState.ClearUserState(ctx, userID, instanceID)
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
@@ -150,9 +150,9 @@ func (h *Handlers) callbackDelete(ctx context.Context, b *bot.Bot, chatID int64,
 }
 
 func (h *Handlers) callbackSession(ctx context.Context, b *bot.Bot, chatID int64, userID int64, sessionID string) {
-	_ = h.store.SetActiveSession(userID, sessionID)
+	_ = h.tgState.SetActiveSession(ctx, userID, sessionID)
 
-	state, _ := h.store.GetUserState(userID)
+	state, _ := h.tgState.GetUserState(ctx, userID)
 	inst := h.procMgr.GetInstance(state.ActiveInstanceID)
 
 	instName := "unknown"
@@ -161,7 +161,7 @@ func (h *Handlers) callbackSession(ctx context.Context, b *bot.Bot, chatID int64
 	}
 
 	label := sessionID
-	if cs, _ := h.store.GetClaudeSession(sessionID); cs != nil && cs.Title != "" {
+	if cs, _ := h.store.GetClaudeSession(state.ActiveInstanceID, sessionID); cs != nil && cs.Title != "" {
 		label = fmt.Sprintf("%s (%d msgs)", cs.Title, cs.MessageCount)
 	}
 
@@ -173,7 +173,7 @@ func (h *Handlers) callbackSession(ctx context.Context, b *bot.Bot, chatID int64
 }
 
 func (h *Handlers) callbackAbort(ctx context.Context, b *bot.Bot, chatID int64, userID int64, sessionID string) {
-	inst, err := h.getActiveInstance(userID)
+	inst, err := h.getActiveInstance(ctx, userID)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: err.Error()})
 		return
@@ -208,7 +208,12 @@ func (h *Handlers) callbackStopTask(ctx context.Context, b *bot.Bot, chatID int6
 }
 
 func (h *Handlers) callbackMergeFix(ctx context.Context, b *bot.Bot, chatID int64, userID int64, sessionID string) {
-	cs, err := h.store.GetClaudeSession(sessionID)
+	state, _ := h.tgState.GetUserState(ctx, userID)
+	activeInstID := ""
+	if state != nil {
+		activeInstID = state.ActiveInstanceID
+	}
+	cs, err := h.store.GetClaudeSession(activeInstID, sessionID)
 	if err != nil || cs == nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Session not found."})
 		return
@@ -250,11 +255,11 @@ func (h *Handlers) callbackMergeFix(ctx context.Context, b *bot.Bot, chatID int6
 		return
 	}
 
-	_ = h.store.SetActiveInstance(userID, inst.ID)
-	_ = h.store.SetActiveSession(userID, newSession.ID)
+	_ = h.tgState.SetActiveInstance(ctx, userID, inst.ID)
+	_ = h.tgState.SetActiveSession(ctx, userID, newSession.ID)
 
 	title := fmt.Sprintf("Merge fix: %s", cs.Branch)
-	_ = h.store.UpdateClaudeSessionTitle(newSession.ID, title)
+	_ = h.store.UpdateClaudeSessionTitle(inst.ID, newSession.ID, title)
 
 	prompt := fmt.Sprintf(
 		"Please merge the git branch `%s` into the current branch and resolve any merge conflicts. "+
@@ -267,19 +272,24 @@ func (h *Handlers) callbackMergeFix(ctx context.Context, b *bot.Bot, chatID int6
 
 func (h *Handlers) callbackDeleteSession(ctx context.Context, b *bot.Bot, chatID int64, userID int64, sessionID string) {
 	// If deleting the active session, clear it
-	state, _ := h.store.GetUserState(userID)
+	state, _ := h.tgState.GetUserState(ctx, userID)
 	if state != nil && state.ActiveSessionID == sessionID {
-		_ = h.store.SetActiveSession(userID, "")
+		_ = h.tgState.SetActiveSession(ctx, userID, "")
 	}
 
-	cs, _ := h.store.GetClaudeSession(sessionID)
+	instanceID := ""
+	if state != nil {
+		instanceID = state.ActiveInstanceID
+	}
+
+	cs, _ := h.store.GetClaudeSession(instanceID, sessionID)
 	label := sessionID
 	if cs != nil && cs.Title != "" {
 		label = cs.Title
 	}
 
 	// Use provider's DeleteSession if available (handles worktree cleanup)
-	inst, _ := h.getActiveInstance(userID)
+	inst, _ := h.getActiveInstance(ctx, userID)
 	if inst != nil {
 		if ccp, ok := inst.Provider.(interface {
 			DeleteSession(ctx context.Context, sessionID string) error
@@ -289,13 +299,13 @@ func (h *Handlers) callbackDeleteSession(ctx context.Context, b *bot.Bot, chatID
 				return
 			}
 		} else {
-			if err := h.store.DeleteClaudeSession(sessionID); err != nil {
+			if err := h.store.DeleteClaudeSession(inst.ID, sessionID); err != nil {
 				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to delete session: %s", err)})
 				return
 			}
 		}
 	} else {
-		if err := h.store.DeleteClaudeSession(sessionID); err != nil {
+		if err := h.store.DeleteClaudeSession(instanceID, sessionID); err != nil {
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to delete session: %s", err)})
 			return
 		}
@@ -309,7 +319,7 @@ func (h *Handlers) callbackDeleteSession(ctx context.Context, b *bot.Bot, chatID
 }
 
 func (h *Handlers) callbackNewSession(ctx context.Context, b *bot.Bot, chatID int64, userID int64) {
-	inst, err := h.getActiveInstance(userID)
+	inst, err := h.getActiveInstance(ctx, userID)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: err.Error()})
 		return
@@ -326,7 +336,7 @@ func (h *Handlers) callbackNewSession(ctx context.Context, b *bot.Bot, chatID in
 		return
 	}
 
-	_ = h.store.SetActiveSession(userID, session.ID)
+	_ = h.tgState.SetActiveSession(ctx, userID, session.ID)
 
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
@@ -377,7 +387,7 @@ func (h *Handlers) callbackWorktreeChoice(ctx context.Context, b *bot.Bot, chatI
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to create session: %s", err)})
 			return
 		}
-		_ = h.store.SetActiveSession(pp.userID, session.ID)
+		_ = h.tgState.SetActiveSession(ctx, pp.userID, session.ID)
 
 		locLabel := "📂 main dir"
 		if useWorktree {
@@ -426,7 +436,7 @@ func (h *Handlers) callbackMainDirConflict(ctx context.Context, b *bot.Bot, chat
 				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Failed to create session: %s", err)})
 				return
 			}
-			_ = h.store.SetActiveSession(pp.userID, session.ID)
+			_ = h.tgState.SetActiveSession(ctx, pp.userID, session.ID)
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID:    chatID,
 				Text:      fmt.Sprintf("<b>[%s]</b> New session (🌿 worktree): <code>%s</code>", escapeHTML(pp.inst.Name), session.ID),

@@ -2,10 +2,12 @@ package firebase
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	urlpkg "net/url"
 	"sync"
 	"time"
@@ -20,6 +22,7 @@ type Auth struct {
 	idToken      string
 	refreshToken string
 	expiresAt    time.Time
+	uid          string
 }
 
 func NewAuth(apiKey string) *Auth {
@@ -66,9 +69,10 @@ func (a *Auth) SignIn(email, password string) error {
 	a.idToken = result.IDToken
 	a.refreshToken = result.RefreshToken
 	a.expiresAt = time.Now().Add(55 * time.Minute) // Firebase tokens expire in 3600s
+	a.uid = extractUID(result.IDToken)
 	a.mu.Unlock()
 
-	slog.Info("firebase: signed in successfully")
+	slog.Info("firebase: signed in successfully", "uid", a.uid)
 	return nil
 }
 
@@ -137,7 +141,41 @@ func (a *Auth) refresh() (string, error) {
 	a.idToken = result.IDToken
 	a.refreshToken = result.RefreshToken
 	a.expiresAt = time.Now().Add(55 * time.Minute)
+	a.uid = extractUID(result.IDToken)
 
-	slog.Debug("firebase: token refreshed")
+	slog.Debug("firebase: token refreshed", "uid", a.uid)
 	return a.idToken, nil
+}
+
+// UID returns the Firebase user ID extracted from the current ID token.
+func (a *Auth) UID() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.uid
+}
+
+// extractUID decodes the JWT payload (middle segment) and extracts user_id.
+func extractUID(idToken string) string {
+	parts := strings.SplitN(idToken, ".", 3)
+	if len(parts) < 2 {
+		return ""
+	}
+	// JWT payload is base64url-encoded; add padding if needed.
+	payload := parts[1]
+	if m := len(payload) % 4; m != 0 {
+		payload += strings.Repeat("=", 4-m)
+	}
+	data, err := base64.URLEncoding.DecodeString(payload)
+	if err != nil {
+		slog.Warn("firebase: failed to decode JWT payload", "error", err)
+		return ""
+	}
+	var claims struct {
+		UserID string `json:"user_id"`
+	}
+	if err := json.Unmarshal(data, &claims); err != nil {
+		slog.Warn("firebase: failed to parse JWT claims", "error", err)
+		return ""
+	}
+	return claims.UserID
 }

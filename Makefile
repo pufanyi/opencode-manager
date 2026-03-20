@@ -15,9 +15,6 @@ build: web
 run: build
 	$(BUILD_DIR)/$(BINARY)
 
-run-legacy: build
-	$(BUILD_DIR)/$(BINARY) --legacy
-
 dev:
 	@mkdir -p internal/web/dist/browser
 	@[ -f internal/web/dist/browser/index.html ] || echo '<!doctype html><html><body>dev mode</body></html>' > internal/web/dist/browser/index.html

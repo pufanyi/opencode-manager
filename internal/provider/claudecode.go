@@ -281,7 +281,7 @@ func (p *ClaudeCodeProvider) enforceWorktreeLimit() {
 		if s.Branch != "" {
 			_ = exec.Command("git", "-C", p.dir, "branch", "-D", s.Branch).Run()
 		}
-		_ = p.store.DeleteClaudeSession(s.ID)
+		_ = p.store.DeleteClaudeSession(p.instID, s.ID)
 		evicted++
 	}
 
@@ -368,7 +368,7 @@ func (p *ClaudeCodeProvider) CreateSession(ctx context.Context, opts *CreateSess
 }
 
 func (p *ClaudeCodeProvider) GetSession(ctx context.Context, sessionID string) (*Session, error) {
-	s, err := p.store.GetClaudeSession(sessionID)
+	s, err := p.store.GetClaudeSession(p.instID, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -404,7 +404,7 @@ func (p *ClaudeCodeProvider) Prompt(ctx context.Context, sessionID string, conte
 
 	// Determine working directory: use worktree if available
 	workDir := p.dir
-	cs, err := p.store.GetClaudeSession(sessionID)
+	cs, err := p.store.GetClaudeSession(p.instID, sessionID)
 	if err == nil && cs != nil && cs.WorktreePath != "" {
 		if _, statErr := os.Stat(cs.WorktreePath); statErr == nil {
 			workDir = cs.WorktreePath
@@ -534,7 +534,7 @@ func (p *ClaudeCodeProvider) Abort(ctx context.Context, sessionID string) error 
 
 // DeleteSession removes the worktree and branch for a session.
 func (p *ClaudeCodeProvider) DeleteSession(ctx context.Context, sessionID string) error {
-	cs, err := p.store.GetClaudeSession(sessionID)
+	cs, err := p.store.GetClaudeSession(p.instID, sessionID)
 	if err != nil {
 		return err
 	}
@@ -555,7 +555,7 @@ func (p *ClaudeCodeProvider) DeleteSession(ctx context.Context, sessionID string
 		_ = exec.Command("git", "-C", p.dir, "branch", "-D", cs.Branch).Run()
 	}
 
-	return p.store.DeleteClaudeSession(sessionID)
+	return p.store.DeleteClaudeSession(p.instID, sessionID)
 }
 
 // Claude Code stream-json event types (with --include-partial-messages).

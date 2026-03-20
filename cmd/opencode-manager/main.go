@@ -19,6 +19,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/google/uuid"
 	"github.com/pufanyi/opencode-manager/internal/app"
 	"github.com/pufanyi/opencode-manager/internal/config"
 	"github.com/pufanyi/opencode-manager/internal/firebase"
@@ -37,6 +38,7 @@ type credentialsFile struct {
 		Password     string `yaml:"password,omitempty"`
 		RefreshToken string `yaml:"refresh_token,omitempty"`
 	} `yaml:"firebase"`
+	ClientID string `yaml:"client_id,omitempty"`
 }
 
 func main() {
@@ -121,17 +123,32 @@ func runLogin() {
 	fmt.Println()
 
 	// Connect to Firebase for subsequent steps.
-	fbAuth := firebase.NewAuth(projectCfg.APIKey)
-	if err := fbAuth.SignInWithRefreshToken(refreshToken); err != nil {
-		printFail("Token verification failed: %v", err)
+	loginClientID := uuid.New().String()
+	fbClient, err := firebase.NewClient(firebase.Config{
+		APIKey:       projectCfg.APIKey,
+		DatabaseURL:  projectCfg.DatabaseURL,
+		ProjectID:    projectCfg.ProjectID,
+		RefreshToken: refreshToken,
+		ClientID:     loginClientID,
+	})
+	if err != nil {
+		printFail("Firebase connection failed: %v", err)
 		os.Exit(1)
 	}
-	rtdb := firebase.NewRTDB(projectCfg.DatabaseURL, fbAuth)
 	ctx := context.Background()
 
+	// Create store to read/write config.
+	loginStore := store.NewFirestoreStore(ctx, newFirestoreAdapter(fbClient), fbClient.UID())
+
 	// Check for existing config.
-	remoteConfig := firebase.NewRemoteConfig(rtdb)
-	existing, _ := remoteConfig.Pull(ctx)
+	existing, _ := loginStore.GetUserConfig()
+	if existing == nil {
+		existing = make(map[string]string)
+	}
+	existingClient, _ := loginStore.GetClientConfig(loginClientID)
+	if existingClient == nil {
+		existingClient = make(map[string]string)
+	}
 
 	// ── Step 2: Telegram Bot ───────────────────────────────────────────
 	printLoginStep(2, "Telegram Bot")
@@ -161,7 +178,7 @@ func runLogin() {
 	printLoginStep(3, "AI Coding Tools")
 
 	claudeBin := detectBinary("claude", "Claude Code")
-	defaultClaude := existing["process.claudecode_binary"]
+	defaultClaude := existingClient["process.claudecode_binary"]
 	if defaultClaude == "" {
 		defaultClaude = claudeBin
 	}
@@ -171,7 +188,7 @@ func runLogin() {
 	}
 
 	opencodeBin := detectBinary("opencode", "OpenCode")
-	defaultOpencode := existing["process.opencode_binary"]
+	defaultOpencode := existingClient["process.opencode_binary"]
 	if defaultOpencode == "" {
 		defaultOpencode = opencodeBin
 	}
@@ -186,14 +203,16 @@ func runLogin() {
 	// ── Step 4: Save everything ────────────────────────────────────────
 	printLoginStep(4, "Save configuration")
 
-	// Save credentials locally.
+	// Save credentials locally (with auto-generated client_id).
+	credClientID := uuid.New().String()
 	content := fmt.Sprintf(`firebase:
   api_key: %q
   database_url: %q
   auth_domain: %q
   project_id: %q
   refresh_token: %q
-`, projectCfg.APIKey, projectCfg.DatabaseURL, projectCfg.AuthDomain, projectCfg.ProjectID, refreshToken)
+client_id: %q
+`, projectCfg.APIKey, projectCfg.DatabaseURL, projectCfg.AuthDomain, projectCfg.ProjectID, refreshToken, credClientID)
 
 	if err := os.WriteFile(*credPath, []byte(content), 0600); err != nil {
 		printFail("Failed to write %s: %v", *credPath, err)
@@ -201,25 +220,39 @@ func runLogin() {
 	}
 	printOK("Credentials saved to %s", *credPath)
 
-	// Push config to Firebase.
-	settings := map[string]string{
-		"telegram.token":            token,
-		"telegram.allowed_users":    users,
-		"process.claudecode_binary": claudePath,
-		"process.opencode_binary":   opencodePath,
+	// Push user config to Firestore.
+	userSettings := map[string]string{
+		"telegram.token":         token,
+		"telegram.allowed_users": users,
 	}
-	// Preserve existing settings not covered by this wizard.
 	for k, v := range existing {
-		if _, overridden := settings[k]; !overridden {
-			settings[k] = v
+		if _, overridden := userSettings[k]; !overridden {
+			userSettings[k] = v
 		}
 	}
 
-	if err := remoteConfig.Push(ctx, settings); err != nil {
-		printFail("Failed to push config to Firebase: %v", err)
+	if err := loginStore.SetUserConfig(userSettings); err != nil {
+		printFail("Failed to push user config to Firestore: %v", err)
 		os.Exit(1)
 	}
-	printOK("Config pushed to Firebase (%d keys)", len(settings))
+	printOK("User config pushed to Firestore (%d keys)", len(userSettings))
+
+	// Push client config to Firestore.
+	clientSettings := map[string]string{
+		"process.claudecode_binary": claudePath,
+		"process.opencode_binary":   opencodePath,
+	}
+	for k, v := range existingClient {
+		if _, overridden := clientSettings[k]; !overridden {
+			clientSettings[k] = v
+		}
+	}
+
+	if err := loginStore.SetClientConfig(credClientID, clientSettings); err != nil {
+		printFail("Failed to push client config to Firestore: %v", err)
+		os.Exit(1)
+	}
+	printOK("Client config pushed to Firestore (%d keys)", len(clientSettings))
 	fmt.Println()
 
 	// ── Done ───────────────────────────────────────────────────────────
@@ -528,6 +561,9 @@ func runServe() {
 		os.Exit(1)
 	}
 
+	// Auto-generate client_id on first run.
+	ensureClientID(creds, *credPath)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -545,6 +581,7 @@ func runServe() {
 	if err != nil {
 		if nextCreds, recovered := maybeRecoverFirebaseCredentials(*credPath, creds, err); recovered {
 			creds = nextCreds
+			ensureClientID(creds, *credPath)
 			fbClient, err = newFirebaseClient(creds)
 		}
 	}
@@ -553,42 +590,44 @@ func runServe() {
 		os.Exit(1)
 	}
 
-	// Pull config from Firebase.
-	remoteConfig := firebase.NewRemoteConfig(fbClient.RTDB)
-	settings, err := remoteConfig.Pull(ctx)
+	// Create Firestore store for persistent data.
+	if fbClient.Firestore == nil {
+		slog.Error("Firestore not available (ProjectID is required)")
+		os.Exit(1)
+	}
+	st := store.NewFirestoreStore(ctx, newFirestoreAdapter(fbClient), fbClient.UID())
+	slog.Info("using Firestore for persistent storage", "uid", fbClient.UID(), "client_id", fbClient.ClientID())
+
+	// Pull config from Firestore (user-level + client-level).
+	userConfig, err := st.GetUserConfig()
 	if err != nil {
 		if nextCreds, recovered := maybeRecoverFirebaseCredentials(*credPath, creds, err); recovered {
 			creds = nextCreds
+			ensureClientID(creds, *credPath)
 			fbClient, err = newFirebaseClient(creds)
 			if err == nil {
-				remoteConfig = firebase.NewRemoteConfig(fbClient.RTDB)
-				settings, err = remoteConfig.Pull(ctx)
+				st = store.NewFirestoreStore(ctx, newFirestoreAdapter(fbClient), fbClient.UID())
+				userConfig, err = st.GetUserConfig()
 			}
 		}
 	}
 	if err != nil {
-		slog.Error("failed to pull config from Firebase", "error", err)
+		slog.Error("failed to pull user config from Firestore", "error", err)
 		os.Exit(1)
 	}
 
-	if len(settings) == 0 {
-		slog.Info("no config found in Firebase — waiting for web frontend setup...")
-		slog.Info("open the web frontend and configure Telegram token, allowed users, etc.")
-		settings, err = remoteConfig.WaitForConfig(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				slog.Info("shutting down")
-				os.Exit(0)
-			}
-			slog.Error("waiting for config failed", "error", err)
-			os.Exit(1)
-		}
+	clientConfig, _ := st.GetClientConfig(fbClient.ClientID())
+
+	if len(userConfig) == 0 {
+		slog.Info("no config found in Firestore — run 'login' to set up configuration")
+		slog.Info("hint: use the login command to configure Telegram token, allowed users, etc.")
+		os.Exit(1)
 	}
 
-	slog.Info("config loaded from Firebase", "keys", len(settings))
+	slog.Info("config loaded from Firestore", "user_keys", len(userConfig), "client_keys", len(clientConfig))
 
-	// Build config from remote settings.
-	cfg := config.LoadFromSettings(settings)
+	// Build config from Firestore settings.
+	cfg := config.LoadFromSettings(userConfig, clientConfig)
 	config.ApplyEnvOverrides(cfg)
 
 	// Force Firebase enabled with credentials from file.
@@ -610,16 +649,8 @@ func runServe() {
 		os.Exit(1)
 	}
 
-	// Create Firestore store for persistent data.
-	if fbClient.Firestore == nil {
-		slog.Error("Firestore not available (ProjectID is required)")
-		os.Exit(1)
-	}
-	st := store.NewFirestoreStore(ctx, newFirestoreAdapter(fbClient))
-	slog.Info("using Firestore for persistent storage")
-
 	// Create and start application.
-	application, err := app.New(cfg, st, *devMode)
+	application, err := app.New(cfg, st, fbClient, *devMode)
 	if err != nil {
 		slog.Error("failed to initialize application", "error", err)
 		st.Close()
@@ -698,7 +729,21 @@ func newFirebaseClient(creds *credentialsFile) (*firebase.Client, error) {
 		Email:        creds.Firebase.Email,
 		Password:     creds.Firebase.Password,
 		RefreshToken: creds.Firebase.RefreshToken,
+		ClientID:     creds.ClientID,
 	})
+}
+
+// ensureClientID auto-generates a client_id if not present and persists it.
+func ensureClientID(creds *credentialsFile, credPath string) {
+	if creds.ClientID != "" {
+		return
+	}
+	creds.ClientID = uuid.New().String()
+	if err := writeCredentials(credPath, creds); err != nil {
+		slog.Warn("failed to persist auto-generated client_id", "error", err)
+	} else {
+		slog.Info("auto-generated client_id", "client_id", creds.ClientID)
+	}
 }
 
 func maybeRecoverFirebaseCredentials(credPath string, creds *credentialsFile, cause error) (*credentialsFile, bool) {
@@ -751,5 +796,3 @@ func isInteractiveTerminal() bool {
 	}
 	return (info.Mode() & os.ModeCharDevice) != 0
 }
-
-// runLegacy is the original boot path: config from local SQLite.

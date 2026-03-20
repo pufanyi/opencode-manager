@@ -20,6 +20,7 @@ type CrashCallback func(inst *Instance, err error)
 type Manager struct {
 	mu               sync.RWMutex
 	instances        map[string]*Instance // keyed by ID
+	clientID         string
 	opencodeBinary   string
 	claudeCodeBinary string
 	portPool         *PortPool
@@ -33,10 +34,11 @@ type Manager struct {
 	cancel context.CancelFunc
 }
 
-func NewManager(ctx context.Context, opencodeBinary, claudeCodeBinary string, portPool *PortPool, st store.Store, healthInterval time.Duration, maxRestarts int) *Manager {
+func NewManager(ctx context.Context, clientID, opencodeBinary, claudeCodeBinary string, portPool *PortPool, st store.Store, healthInterval time.Duration, maxRestarts int) *Manager {
 	mCtx, cancel := context.WithCancel(ctx)
 	return &Manager{
 		instances:        make(map[string]*Instance),
+		clientID:         clientID,
 		opencodeBinary:   opencodeBinary,
 		claudeCodeBinary: claudeCodeBinary,
 		portPool:         portPool,
@@ -95,6 +97,7 @@ func (m *Manager) CreateAndStart(name, directory string, autoStart bool, provide
 		Directory:    directory,
 		Port:         port,
 		Password:     password,
+		ClientID:     m.clientID,
 		ProviderType: providerType,
 		Provider:     prov,
 		status:       StatusStopped,
@@ -109,6 +112,7 @@ func (m *Manager) CreateAndStart(name, directory string, autoStart bool, provide
 		Status:       string(StatusStopped),
 		AutoStart:    autoStart,
 		ProviderType: string(providerType),
+		ClientID:     m.clientID,
 	}); err != nil {
 		if providerType == provider.TypeOpenCode {
 			m.portPool.Release(port)
@@ -368,6 +372,11 @@ func (m *Manager) RestoreInstances() error {
 	}
 
 	for _, dbInst := range instances {
+		// Only restore instances owned by this client.
+		if dbInst.ClientID != "" && dbInst.ClientID != m.clientID {
+			continue
+		}
+
 		provType := provider.Type(dbInst.ProviderType)
 		var port int
 
@@ -389,6 +398,7 @@ func (m *Manager) RestoreInstances() error {
 			Directory:    dbInst.Directory,
 			Port:         port,
 			Password:     dbInst.Password,
+			ClientID:     dbInst.ClientID,
 			ProviderType: provType,
 			Provider:     prov,
 			status:       StatusStopped,
@@ -420,6 +430,10 @@ func (m *Manager) LoadStopped() error {
 		if _, exists := m.instances[dbInst.ID]; exists {
 			continue
 		}
+		// Only load instances owned by this client.
+		if dbInst.ClientID != "" && dbInst.ClientID != m.clientID {
+			continue
+		}
 		provType := provider.Type(dbInst.ProviderType)
 		prov := m.createProvider(provType, dbInst.Directory, dbInst.Port, dbInst.Password, dbInst.ID)
 		m.instances[dbInst.ID] = &Instance{
@@ -428,6 +442,7 @@ func (m *Manager) LoadStopped() error {
 			Directory:    dbInst.Directory,
 			Port:         dbInst.Port,
 			Password:     dbInst.Password,
+			ClientID:     dbInst.ClientID,
 			ProviderType: provType,
 			Provider:     prov,
 			status:       InstanceStatus(dbInst.Status),

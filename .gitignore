@@ -1,7 +1,5 @@
 /bin/
 /opencode-manager
-/data/
-*.db
 node_modules/
 web/node_modules/
 web/.angular/

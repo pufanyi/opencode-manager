@@ -46,6 +46,10 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
 
   constructor(private firebase: FirebaseService) {}
 
+  private get uid(): string | null {
+    return this.firebase.currentUser?.uid ?? null;
+  }
+
   ngOnChanges(changes: SimpleChanges): void {
     if ("instance" in changes) {
       this.cleanup();
@@ -66,9 +70,9 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
   }
 
   async loadSessions() {
-    if (!this.instance) return;
+    if (!this.instance || !this.uid) return;
     try {
-      const result = await this.firebase.sendCommandAndWait(this.instance.id, "list_sessions");
+      const result = await this.firebase.sendCommandAndWait(this.uid, this.instance.id, "list_sessions");
       this.sessions = (result as Session[]) ?? [];
       if (this.sessions.length > 0 && !this.selectedSessionId) {
         this.selectedSessionId = this.sessions[0].ID;
@@ -80,9 +84,9 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
   }
 
   async createSession() {
-    if (!this.instance) return;
+    if (!this.instance || !this.uid) return;
     try {
-      const result = await this.firebase.sendCommandAndWait(this.instance.id, "create_session");
+      const result = await this.firebase.sendCommandAndWait(this.uid, this.instance.id, "create_session");
       const session = result as Session;
       this.sessions = [...this.sessions, session];
       this.selectedSessionId = session.ID;
@@ -104,9 +108,10 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
   }
 
   async loadHistory(sessionId: string) {
+    if (!this.uid || !this.instance) return;
     this.loadingHistory = true;
     try {
-      const messages = await this.firebase.getSessionHistory(sessionId);
+      const messages = await this.firebase.getSessionHistory(this.uid, this.instance.id, sessionId);
       this.history = messages.map((m) => ({
         role: m.role,
         content: m.content,
@@ -120,7 +125,7 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
   }
 
   async sendPrompt() {
-    if (!this.instance || !this.selectedSessionId || !this.promptText.trim()) return;
+    if (!this.instance || !this.selectedSessionId || !this.promptText.trim() || !this.uid) return;
 
     this.streaming = true;
     this.responseText = "";
@@ -130,7 +135,7 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
     this.listenToStream(this.selectedSessionId);
 
     try {
-      await this.firebase.sendCommand(this.instance.id, "prompt", {
+      await this.firebase.sendCommand(this.uid, this.instance.id, "prompt", {
         session_id: this.selectedSessionId,
         content: this.promptText.trim(),
       });
@@ -150,8 +155,9 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
 
   private listenToStream(sessionId: string) {
     this.cleanup();
+    if (!this.uid) return;
 
-    this.unsubStream = this.firebase.onStream(sessionId, (data: StreamData | null) => {
+    this.unsubStream = this.firebase.onStream(this.uid, sessionId, (data: StreamData | null) => {
       if (!data) return;
 
       this.responseText = data.content || "";

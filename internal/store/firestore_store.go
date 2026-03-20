@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -27,18 +26,57 @@ type FirestoreDoc struct {
 }
 
 // FirestoreStore is the cloud-backed implementation of Store using Firestore REST API.
-// RTDB remains for fast ephemeral communication; Firestore holds all persistent data.
+// All data is scoped under users/{uid}/ in Firestore.
 type FirestoreStore struct {
 	fs  FirestoreClient
 	ctx context.Context
+	uid string // Firebase user ID — all paths are scoped to this user
 }
 
-// NewFirestoreStore creates a Firestore-backed store.
-func NewFirestoreStore(ctx context.Context, fs FirestoreClient) *FirestoreStore {
-	return &FirestoreStore{fs: fs, ctx: ctx}
+// NewFirestoreStore creates a Firestore-backed store scoped to the given user.
+func NewFirestoreStore(ctx context.Context, fs FirestoreClient, uid string) *FirestoreStore {
+	return &FirestoreStore{fs: fs, ctx: ctx, uid: uid}
 }
 
 func (s *FirestoreStore) Close() error { return nil }
+
+// ── Path helpers ────────────────────────────────────────────────────────────
+
+func (s *FirestoreStore) instancePath(id string) string {
+	return fmt.Sprintf("users/%s/instances/%s", s.uid, id)
+}
+
+func (s *FirestoreStore) instancesCollection() string {
+	return fmt.Sprintf("users/%s/instances", s.uid)
+}
+
+func (s *FirestoreStore) sessionPath(instanceID, sessionID string) string {
+	return fmt.Sprintf("users/%s/instances/%s/sessions/%s", s.uid, instanceID, sessionID)
+}
+
+func (s *FirestoreStore) sessionsCollection(instanceID string) string {
+	return fmt.Sprintf("users/%s/instances/%s/sessions", s.uid, instanceID)
+}
+
+func (s *FirestoreStore) messagePath(instanceID, sessionID, messageID string) string {
+	return fmt.Sprintf("users/%s/instances/%s/sessions/%s/messages/%s", s.uid, instanceID, sessionID, messageID)
+}
+
+func (s *FirestoreStore) messagesCollection(instanceID, sessionID string) string {
+	return fmt.Sprintf("users/%s/instances/%s/sessions/%s/messages", s.uid, instanceID, sessionID)
+}
+
+func (s *FirestoreStore) clientPath(clientID string) string {
+	return fmt.Sprintf("users/%s/clients/%s", s.uid, clientID)
+}
+
+func (s *FirestoreStore) userConfigPath() string {
+	return fmt.Sprintf("users/%s/config/user", s.uid)
+}
+
+func (s *FirestoreStore) clientConfigPath(clientID string) string {
+	return fmt.Sprintf("users/%s/config/clients/%s", s.uid, clientID)
+}
 
 // ── Instances ───────────────────────────────────────────────────────────────
 
@@ -56,14 +94,15 @@ func (s *FirestoreStore) CreateInstance(inst *Instance) error {
 		"status":        inst.Status,
 		"auto_start":    inst.AutoStart,
 		"provider_type": inst.ProviderType,
+		"client_id":     inst.ClientID,
 		"created_at":    now,
 		"updated_at":    now,
 	}
-	return s.fs.SetDoc(s.ctx, "instances/"+inst.ID, fields)
+	return s.fs.SetDoc(s.ctx, s.instancePath(inst.ID), fields)
 }
 
 func (s *FirestoreStore) GetInstance(id string) (*Instance, error) {
-	doc, err := s.fs.GetDoc(s.ctx, "instances/"+id)
+	doc, err := s.fs.GetDoc(s.ctx, s.instancePath(id))
 	if err != nil {
 		return nil, fmt.Errorf("getting instance %s: %w", id, err)
 	}
@@ -74,8 +113,6 @@ func (s *FirestoreStore) GetInstance(id string) (*Instance, error) {
 }
 
 func (s *FirestoreStore) GetInstanceByName(name string) (*Instance, error) {
-	// Firestore REST doesn't have simple field queries on the list endpoint.
-	// Since instance count is small, list all and filter.
 	instances, err := s.ListInstances()
 	if err != nil {
 		return nil, err
@@ -89,7 +126,7 @@ func (s *FirestoreStore) GetInstanceByName(name string) (*Instance, error) {
 }
 
 func (s *FirestoreStore) ListInstances() ([]*Instance, error) {
-	docs, err := s.fs.ListDocs(s.ctx, "instances")
+	docs, err := s.fs.ListDocs(s.ctx, s.instancesCollection())
 	if err != nil {
 		return nil, fmt.Errorf("listing instances: %w", err)
 	}
@@ -114,27 +151,41 @@ func (s *FirestoreStore) GetRunningInstances() ([]*Instance, error) {
 	return result, nil
 }
 
+func (s *FirestoreStore) GetInstancesByClient(clientID string) ([]*Instance, error) {
+	all, err := s.ListInstances()
+	if err != nil {
+		return nil, err
+	}
+	var result []*Instance
+	for _, inst := range all {
+		if inst.ClientID == clientID {
+			result = append(result, inst)
+		}
+	}
+	return result, nil
+}
+
 func (s *FirestoreStore) UpdateInstanceStatus(id, status string) error {
-	return s.fs.UpdateDoc(s.ctx, "instances/"+id, map[string]interface{}{
+	return s.fs.UpdateDoc(s.ctx, s.instancePath(id), map[string]interface{}{
 		"status":     status,
 		"updated_at": time.Now(),
 	})
 }
 
 func (s *FirestoreStore) UpdateInstancePort(id string, port int) error {
-	return s.fs.UpdateDoc(s.ctx, "instances/"+id, map[string]interface{}{
+	return s.fs.UpdateDoc(s.ctx, s.instancePath(id), map[string]interface{}{
 		"port":       port,
 		"updated_at": time.Now(),
 	})
 }
 
 func (s *FirestoreStore) DeleteInstance(id string) error {
-	// Delete associated sessions first.
+	// Delete associated sessions first — we need to know the instance to enumerate sessions.
 	sessions, _ := s.ListClaudeSessions(id)
 	for _, sess := range sessions {
-		_ = s.DeleteClaudeSession(sess.ID)
+		_ = s.DeleteClaudeSession(id, sess.ID)
 	}
-	return s.fs.DeleteDoc(s.ctx, "instances/"+id)
+	return s.fs.DeleteDoc(s.ctx, s.instancePath(id))
 }
 
 // ── Sessions ────────────────────────────────────────────────────────────────
@@ -151,11 +202,11 @@ func (s *FirestoreStore) CreateClaudeSession(instanceID, sessionID, title, workt
 		"created_at":    now,
 		"updated_at":    now,
 	}
-	return s.fs.SetDoc(s.ctx, "sessions/"+sessionID, fields)
+	return s.fs.SetDoc(s.ctx, s.sessionPath(instanceID, sessionID), fields)
 }
 
-func (s *FirestoreStore) GetClaudeSession(sessionID string) (*ClaudeSession, error) {
-	doc, err := s.fs.GetDoc(s.ctx, "sessions/"+sessionID)
+func (s *FirestoreStore) GetClaudeSession(instanceID, sessionID string) (*ClaudeSession, error) {
+	doc, err := s.fs.GetDoc(s.ctx, s.sessionPath(instanceID, sessionID))
 	if err != nil {
 		return nil, fmt.Errorf("getting session %s: %w", sessionID, err)
 	}
@@ -166,161 +217,61 @@ func (s *FirestoreStore) GetClaudeSession(sessionID string) (*ClaudeSession, err
 }
 
 func (s *FirestoreStore) ListClaudeSessions(instanceID string) ([]ClaudeSession, error) {
-	docs, err := s.fs.ListDocs(s.ctx, "sessions")
+	docs, err := s.fs.ListDocs(s.ctx, s.sessionsCollection(instanceID))
 	if err != nil {
 		return nil, fmt.Errorf("listing sessions: %w", err)
 	}
 	var sessions []ClaudeSession
 	for _, doc := range docs {
-		cs := docToSession(doc)
-		if cs.InstanceID == instanceID {
-			sessions = append(sessions, *cs)
-		}
+		sessions = append(sessions, *docToSession(doc))
 	}
 	return sessions, nil
 }
 
-func (s *FirestoreStore) UpdateClaudeSessionTitle(sessionID, title string) error {
-	return s.fs.UpdateDoc(s.ctx, "sessions/"+sessionID, map[string]interface{}{
+func (s *FirestoreStore) UpdateClaudeSessionTitle(instanceID, sessionID, title string) error {
+	return s.fs.UpdateDoc(s.ctx, s.sessionPath(instanceID, sessionID), map[string]interface{}{
 		"title":      title,
 		"updated_at": time.Now(),
 	})
 }
 
-func (s *FirestoreStore) UpdateClaudeSessionActivity(sessionID string) error {
-	// Read current count, increment, write back.
-	// Acceptable for our low-concurrency use case.
-	doc, err := s.fs.GetDoc(s.ctx, "sessions/"+sessionID)
+func (s *FirestoreStore) UpdateClaudeSessionActivity(instanceID, sessionID string) error {
+	doc, err := s.fs.GetDoc(s.ctx, s.sessionPath(instanceID, sessionID))
 	if err != nil || doc == nil {
 		return err
 	}
 	count := getInt(doc.Fields, "message_count")
-	return s.fs.UpdateDoc(s.ctx, "sessions/"+sessionID, map[string]interface{}{
+	return s.fs.UpdateDoc(s.ctx, s.sessionPath(instanceID, sessionID), map[string]interface{}{
 		"message_count": count + 1,
 		"updated_at":    time.Now(),
 	})
 }
 
-func (s *FirestoreStore) DeleteClaudeSession(sessionID string) error {
+func (s *FirestoreStore) DeleteClaudeSession(instanceID, sessionID string) error {
 	// Delete messages subcollection first.
-	msgs, _ := s.fs.ListDocs(s.ctx, "sessions/"+sessionID+"/messages")
+	msgs, _ := s.fs.ListDocs(s.ctx, s.messagesCollection(instanceID, sessionID))
 	for _, msg := range msgs {
-		_ = s.fs.DeleteDoc(s.ctx, "sessions/"+sessionID+"/messages/"+DocIDFromName(msg.Name))
+		_ = s.fs.DeleteDoc(s.ctx, s.messagePath(instanceID, sessionID, DocIDFromName(msg.Name)))
 	}
-	return s.fs.DeleteDoc(s.ctx, "sessions/"+sessionID)
+	return s.fs.DeleteDoc(s.ctx, s.sessionPath(instanceID, sessionID))
 }
 
-// ── User State ──────────────────────────────────────────────────────────────
+// ── Client Registration ─────────────────────────────────────────────────────
 
-func (s *FirestoreStore) GetUserState(userID int64) (*UserState, error) {
-	key := strconv.FormatInt(userID, 10)
-	doc, err := s.fs.GetDoc(s.ctx, "user_state/"+key)
-	if err != nil {
-		return nil, fmt.Errorf("getting user state: %w", err)
+func (s *FirestoreStore) RegisterClient(info *ClientInfo) error {
+	fields := map[string]interface{}{
+		"client_id":  info.ClientID,
+		"hostname":   info.Hostname,
+		"started_at": info.StartedAt,
+		"updated_at": time.Now(),
 	}
-	if doc == nil {
-		return &UserState{UserID: userID}, nil
-	}
-	return &UserState{
-		UserID:           userID,
-		ActiveInstanceID: getString(doc.Fields, "active_instance_id"),
-		ActiveSessionID:  getString(doc.Fields, "active_session_id"),
-	}, nil
+	return s.fs.SetDoc(s.ctx, s.clientPath(info.ClientID), fields)
 }
 
-func (s *FirestoreStore) SetActiveInstance(userID int64, instanceID string) error {
-	key := strconv.FormatInt(userID, 10)
-	return s.fs.SetDoc(s.ctx, "user_state/"+key, map[string]interface{}{
-		"user_id":            userID,
-		"active_instance_id": instanceID,
-		"active_session_id":  "",
-		"updated_at":         time.Now(),
-	})
-}
+// ── User Config ─────────────────────────────────────────────────────────────
 
-func (s *FirestoreStore) SetActiveSession(userID int64, sessionID string) error {
-	key := strconv.FormatInt(userID, 10)
-	return s.fs.UpdateDoc(s.ctx, "user_state/"+key, map[string]interface{}{
-		"active_session_id": sessionID,
-		"updated_at":        time.Now(),
-	})
-}
-
-func (s *FirestoreStore) ClearUserState(userID int64, instanceID string) error {
-	state, err := s.GetUserState(userID)
-	if err != nil {
-		return err
-	}
-	if state.ActiveInstanceID != instanceID {
-		return nil // Not pointing to this instance, nothing to clear.
-	}
-	key := strconv.FormatInt(userID, 10)
-	return s.fs.UpdateDoc(s.ctx, "user_state/"+key, map[string]interface{}{
-		"active_instance_id": "",
-		"active_session_id":  "",
-		"updated_at":         time.Now(),
-	})
-}
-
-// ── Message Sessions ────────────────────────────────────────────────────────
-
-func (s *FirestoreStore) SetMessageSession(chatID int64, messageID int, sessionID string) error {
-	key := fmt.Sprintf("%d_%d", chatID, messageID)
-	return s.fs.SetDoc(s.ctx, "message_sessions/"+key, map[string]interface{}{
-		"chat_id":    chatID,
-		"message_id": messageID,
-		"session_id": sessionID,
-	})
-}
-
-func (s *FirestoreStore) GetSessionByMessage(chatID int64, messageID int) (string, error) {
-	key := fmt.Sprintf("%d_%d", chatID, messageID)
-	doc, err := s.fs.GetDoc(s.ctx, "message_sessions/"+key)
-	if err != nil {
-		return "", err
-	}
-	if doc == nil {
-		return "", nil
-	}
-	return getString(doc.Fields, "session_id"), nil
-}
-
-// ── Settings ────────────────────────────────────────────────────────────────
-
-// Settings are stored in RTDB /config in cloud mode. These methods provide
-// a Firestore fallback for completeness but are typically not used.
-
-func (s *FirestoreStore) GetSetting(key string) (string, bool, error) {
-	doc, err := s.fs.GetDoc(s.ctx, "settings/config")
-	if err != nil {
-		return "", false, err
-	}
-	if doc == nil {
-		return "", false, nil
-	}
-	val, ok := doc.Fields[key]
-	if !ok {
-		return "", false, nil
-	}
-	return fmt.Sprint(val), true, nil
-}
-
-func (s *FirestoreStore) SetSetting(key, value string) error {
-	return s.fs.UpdateDoc(s.ctx, "settings/config", map[string]interface{}{
-		key: value,
-	})
-}
-
-func (s *FirestoreStore) DeleteSetting(key string) error {
-	// Firestore doesn't support field deletion via simple update.
-	// Set to empty string as equivalent.
-	return s.fs.UpdateDoc(s.ctx, "settings/config", map[string]interface{}{
-		key: "",
-	})
-}
-
-func (s *FirestoreStore) GetAllSettings() (map[string]string, error) {
-	doc, err := s.fs.GetDoc(s.ctx, "settings/config")
+func (s *FirestoreStore) GetUserConfig() (map[string]string, error) {
+	doc, err := s.fs.GetDoc(s.ctx, s.userConfigPath())
 	if err != nil {
 		return nil, err
 	}
@@ -334,25 +285,42 @@ func (s *FirestoreStore) GetAllSettings() (map[string]string, error) {
 	return result, nil
 }
 
-func (s *FirestoreStore) HasSettings() (bool, error) {
-	doc, err := s.fs.GetDoc(s.ctx, "settings/config")
-	if err != nil {
-		return false, err
-	}
-	return doc != nil && len(doc.Fields) > 0, nil
-}
-
-func (s *FirestoreStore) SetSettings(settings map[string]string) error {
-	fields := make(map[string]interface{}, len(settings))
-	for k, v := range settings {
+func (s *FirestoreStore) SetUserConfig(config map[string]string) error {
+	fields := make(map[string]interface{}, len(config))
+	for k, v := range config {
 		fields[k] = v
 	}
-	return s.fs.SetDoc(s.ctx, "settings/config", fields)
+	return s.fs.SetDoc(s.ctx, s.userConfigPath(), fields)
+}
+
+// ── Client Config ───────────────────────────────────────────────────────────
+
+func (s *FirestoreStore) GetClientConfig(clientID string) (map[string]string, error) {
+	doc, err := s.fs.GetDoc(s.ctx, s.clientConfigPath(clientID))
+	if err != nil {
+		return nil, err
+	}
+	if doc == nil {
+		return nil, nil
+	}
+	result := make(map[string]string, len(doc.Fields))
+	for k, v := range doc.Fields {
+		result[k] = fmt.Sprint(v)
+	}
+	return result, nil
+}
+
+func (s *FirestoreStore) SetClientConfig(clientID string, config map[string]string) error {
+	fields := make(map[string]interface{}, len(config))
+	for k, v := range config {
+		fields[k] = v
+	}
+	return s.fs.SetDoc(s.ctx, s.clientConfigPath(clientID), fields)
 }
 
 // ── Message History ─────────────────────────────────────────────────────────
 
-func (s *FirestoreStore) SaveMessage(sessionID string, msg *Message) error {
+func (s *FirestoreStore) SaveMessage(instanceID, sessionID string, msg *Message) error {
 	if msg.ID == "" {
 		msg.ID = fmt.Sprintf("%d", time.Now().UnixNano())
 	}
@@ -360,7 +328,6 @@ func (s *FirestoreStore) SaveMessage(sessionID string, msg *Message) error {
 		msg.CreatedAt = time.Now()
 	}
 
-	// Encode tool calls as array of maps.
 	toolCalls := make([]interface{}, len(msg.ToolCalls))
 	for i, tc := range msg.ToolCalls {
 		toolCalls[i] = map[string]interface{}{
@@ -380,11 +347,11 @@ func (s *FirestoreStore) SaveMessage(sessionID string, msg *Message) error {
 		"created_at": msg.CreatedAt,
 	}
 
-	return s.fs.SetDoc(s.ctx, "sessions/"+sessionID+"/messages/"+msg.ID, fields)
+	return s.fs.SetDoc(s.ctx, s.messagePath(instanceID, sessionID, msg.ID), fields)
 }
 
-func (s *FirestoreStore) ListMessages(sessionID string) ([]*Message, error) {
-	docs, err := s.fs.ListDocs(s.ctx, "sessions/"+sessionID+"/messages")
+func (s *FirestoreStore) ListMessages(instanceID, sessionID string) ([]*Message, error) {
+	docs, err := s.fs.ListDocs(s.ctx, s.messagesCollection(instanceID, sessionID))
 	if err != nil {
 		return nil, fmt.Errorf("listing messages for session %s: %w", sessionID, err)
 	}
@@ -401,7 +368,6 @@ func (s *FirestoreStore) ListMessages(sessionID string) ([]*Message, error) {
 			msg.CreatedAt = parseTimestamp(ts)
 		}
 
-		// Decode tool calls.
 		if raw, ok := doc.Fields["tool_calls"]; ok {
 			if arr, ok := raw.([]interface{}); ok {
 				for _, item := range arr {
@@ -480,20 +446,19 @@ func docToInstance(doc *FirestoreDoc) *Instance {
 		Status:       getString(doc.Fields, "status"),
 		AutoStart:    getBool(doc.Fields, "auto_start"),
 		ProviderType: getString(doc.Fields, "provider_type"),
+		ClientID:     getString(doc.Fields, "client_id"),
 		CreatedAt:    parseTimestamp(getString(doc.Fields, "created_at")),
 		UpdatedAt:    parseTimestamp(getString(doc.Fields, "updated_at")),
 	}
 }
 
 func docToSession(doc *FirestoreDoc) *ClaudeSession {
-	// Try both the Firestore updateTime and the stored field.
 	updatedAt := parseTimestamp(getString(doc.Fields, "updated_at"))
 	if updatedAt.IsZero() {
 		updatedAt = parseTimestamp(doc.UpdateTime)
 	}
 
 	title := getString(doc.Fields, "title")
-	// Handle "0" as empty (Firestore may coerce empty string → "0" on int fields).
 	if title == "0" || title == "<nil>" {
 		title = ""
 	}
