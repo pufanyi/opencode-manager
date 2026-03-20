@@ -674,17 +674,23 @@ func runServe() {
 		os.Exit(1)
 	}
 
-	// Open local SQLite for state cache (instances, sessions).
-	dp := getDBPath(creds, *dbPathFlag)
-	st, err := openStore(dp)
-	if err != nil {
-		slog.Error("failed to open local database", "error", err)
-		os.Exit(1)
-	}
-
-	// Sync remote settings to local DB cache.
-	if err := st.SetSettings(settings); err != nil {
-		slog.Warn("failed to cache settings locally", "error", err)
+	// Create store: Firestore (cloud) or SQLite (fallback).
+	var st store.Store
+	if fbClient.Firestore != nil {
+		st = store.NewFirestoreStore(ctx, newFirestoreAdapter(fbClient))
+		slog.Info("using Firestore for persistent storage")
+	} else {
+		dp := getDBPath(creds, *dbPathFlag)
+		sqlSt, err := openStore(dp)
+		if err != nil {
+			slog.Error("failed to open local database", "error", err)
+			os.Exit(1)
+		}
+		st = sqlSt
+		if err := st.SetSettings(settings); err != nil {
+			slog.Warn("failed to cache settings locally", "error", err)
+		}
+		slog.Info("using SQLite for persistent storage (no ProjectID)", "db", dp)
 	}
 
 	// Create and start application.
@@ -705,7 +711,7 @@ func runServe() {
 		application.Shutdown()
 	}()
 
-	slog.Info("starting opencode-manager (cloud mode)", "db", dp)
+	slog.Info("starting opencode-manager (cloud mode)")
 
 	if err := application.Start(ctx); err != nil {
 		cancel()
@@ -714,6 +720,45 @@ func runServe() {
 	}
 
 	st.Close()
+}
+
+// newFirestoreAdapter bridges firebase.Firestore → store.FirestoreClient,
+// converting firebase.Document → store.FirestoreDoc.
+func newFirestoreAdapter(fbClient *firebase.Client) store.FirestoreClient {
+	fs := fbClient.Firestore
+	return &store.FirestoreAdapter{
+		SetDocFn:    fs.SetDoc,
+		UpdateDocFn: fs.UpdateDoc,
+		DeleteDocFn: fs.DeleteDoc,
+		GetDocFn: func(ctx context.Context, path string) (*store.FirestoreDoc, error) {
+			doc, err := fs.GetDoc(ctx, path)
+			if err != nil || doc == nil {
+				return nil, err
+			}
+			return &store.FirestoreDoc{
+				Name:       doc.Name,
+				Fields:     doc.Fields,
+				CreateTime: doc.CreateTime,
+				UpdateTime: doc.UpdateTime,
+			}, nil
+		},
+		ListDocsFn: func(ctx context.Context, collectionPath string) ([]*store.FirestoreDoc, error) {
+			docs, err := fs.ListDocs(ctx, collectionPath)
+			if err != nil {
+				return nil, err
+			}
+			result := make([]*store.FirestoreDoc, len(docs))
+			for i, doc := range docs {
+				result[i] = &store.FirestoreDoc{
+					Name:       doc.Name,
+					Fields:     doc.Fields,
+					CreateTime: doc.CreateTime,
+					UpdateTime: doc.UpdateTime,
+				}
+			}
+			return result, nil
+		},
+	}
 }
 
 func newFirebaseClient(creds *credentialsFile) (*firebase.Client, error) {
