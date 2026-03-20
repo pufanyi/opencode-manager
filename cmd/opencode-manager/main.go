@@ -23,7 +23,6 @@ import (
 	"github.com/pufanyi/opencode-manager/internal/config"
 	"github.com/pufanyi/opencode-manager/internal/firebase"
 	"github.com/pufanyi/opencode-manager/internal/firebase/loginpage"
-	"github.com/pufanyi/opencode-manager/internal/setup"
 	"github.com/pufanyi/opencode-manager/internal/store"
 )
 
@@ -38,7 +37,6 @@ type credentialsFile struct {
 		Password     string `yaml:"password,omitempty"`
 		RefreshToken string `yaml:"refresh_token,omitempty"`
 	} `yaml:"firebase"`
-	DBPath string `yaml:"db_path,omitempty"` // optional, defaults to ./data/opencode-manager.db
 }
 
 func main() {
@@ -49,9 +47,6 @@ func main() {
 			return
 		case "relogin":
 			runRelogin()
-			return
-		case "setup":
-			runSetup()
 			return
 		}
 	}
@@ -503,63 +498,15 @@ func writeCredentials(path string, creds *credentialsFile) error {
 	return nil
 }
 
-func openStore(dbPath string) (*store.SQLiteStore, error) {
-	dbDir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dbDir, 0755); err != nil {
-		return nil, fmt.Errorf("creating data directory: %w", err)
-	}
-	return store.New(dbPath)
-}
-
-func getDBPath(creds *credentialsFile, flagVal string) string {
-	if flagVal != "" {
-		return flagVal
-	}
-	if v := os.Getenv("STORAGE_DATABASE"); v != "" {
-		return v
-	}
-	if creds != nil && creds.DBPath != "" {
-		return creds.DBPath
-	}
-	return "./data/opencode-manager.db"
-}
-
-// runSetup is the legacy interactive setup wizard (writes to local SQLite).
-func runSetup() {
-	fs := flag.NewFlagSet("setup", flag.ExitOnError)
-	dbFlag := fs.String("db", "", "path to database file")
-	_ = fs.Parse(os.Args[2:])
-
-	dp := getDBPath(nil, *dbFlag)
-	st, err := openStore(dp)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := setup.Run(st); err != nil {
-		st.Close()
-		fmt.Fprintf(os.Stderr, "Setup failed: %v\n", err)
-		os.Exit(1)
-	}
-	st.Close()
-}
-
 func runServe() {
 	credPath := flag.String("credentials", "./credentials.yaml", "path to Firebase credentials file")
-	dbPathFlag := flag.String("db", "", "path to local database file (optional)")
 	devMode := flag.Bool("dev", false, "enable dev mode with Angular dev server (HMR)")
-	legacyMode := flag.Bool("legacy", false, "use local SQLite config instead of Firebase (backward compat)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: opencode-manager [command] [flags]\n\n")
 		fmt.Fprintf(os.Stderr, "Commands:\n")
 		fmt.Fprintf(os.Stderr, "  login    Browser login + interactive cloud setup\n")
 		fmt.Fprintf(os.Stderr, "  relogin  Refresh Firebase browser credentials in credentials.yaml\n")
-		fmt.Fprintf(os.Stderr, "  setup    Interactive setup wizard (legacy, local config)\n")
 		fmt.Fprintf(os.Stderr, "  (none)   Start the manager (default)\n\n")
-		fmt.Fprintf(os.Stderr, "Modes:\n")
-		fmt.Fprintf(os.Stderr, "  Default:  Config from Firebase (needs credentials.yaml)\n")
-		fmt.Fprintf(os.Stderr, "  --legacy: Config from local SQLite database\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 	}
@@ -569,17 +516,6 @@ func runServe() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
-
-	if *legacyMode {
-		ctx, cancel := context.WithCancel(context.Background())
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		runLegacy(ctx, cancel, sigCh, *dbPathFlag, *devMode)
-		cancel()
-		return
-	}
-
-	// ── Cloud-first boot ────────────────────────────────────────────────
 	creds, err := readCredentials(*credPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -674,24 +610,13 @@ func runServe() {
 		os.Exit(1)
 	}
 
-	// Create store: Firestore (cloud) or SQLite (fallback).
-	var st store.Store
-	if fbClient.Firestore != nil {
-		st = store.NewFirestoreStore(ctx, newFirestoreAdapter(fbClient))
-		slog.Info("using Firestore for persistent storage")
-	} else {
-		dp := getDBPath(creds, *dbPathFlag)
-		sqlSt, err := openStore(dp)
-		if err != nil {
-			slog.Error("failed to open local database", "error", err)
-			os.Exit(1)
-		}
-		st = sqlSt
-		if err := st.SetSettings(settings); err != nil {
-			slog.Warn("failed to cache settings locally", "error", err)
-		}
-		slog.Info("using SQLite for persistent storage (no ProjectID)", "db", dp)
+	// Create Firestore store for persistent data.
+	if fbClient.Firestore == nil {
+		slog.Error("Firestore not available (ProjectID is required)")
+		os.Exit(1)
 	}
+	st := store.NewFirestoreStore(ctx, newFirestoreAdapter(fbClient))
+	slog.Info("using Firestore for persistent storage")
 
 	// Create and start application.
 	application, err := app.New(cfg, st, *devMode)
@@ -828,68 +753,3 @@ func isInteractiveTerminal() bool {
 }
 
 // runLegacy is the original boot path: config from local SQLite.
-func runLegacy(ctx context.Context, cancel context.CancelFunc, sigCh <-chan os.Signal, dbPathFlag string, devMode bool) {
-	dp := getDBPath(nil, dbPathFlag)
-
-	st, err := openStore(dp)
-	if err != nil {
-		slog.Error("failed to open database", "error", err)
-		os.Exit(1)
-	}
-
-	hasSettings, err := st.HasSettings()
-	if err != nil {
-		slog.Error("failed to check settings", "error", err)
-		os.Exit(1)
-	}
-
-	if !hasSettings {
-		fmt.Println("No configuration found. Running setup wizard...")
-		fmt.Println()
-		if err := setup.Run(st); err != nil {
-			slog.Error("setup failed", "error", err)
-			st.Close()
-			os.Exit(1)
-		}
-	}
-
-	settings, err := st.GetAllSettings()
-	if err != nil {
-		slog.Error("failed to load settings", "error", err)
-		st.Close()
-		os.Exit(1)
-	}
-
-	cfg := config.LoadFromSettings(settings)
-	config.ApplyEnvOverrides(cfg)
-
-	if err := config.Validate(cfg); err != nil {
-		slog.Error("config validation failed", "error", err)
-		st.Close()
-		os.Exit(1)
-	}
-
-	application, err := app.New(cfg, st, devMode)
-	if err != nil {
-		slog.Error("failed to initialize application", "error", err)
-		st.Close()
-		os.Exit(1)
-	}
-
-	go func() {
-		sig := <-sigCh
-		slog.Info("received signal", "signal", sig)
-		cancel()
-		application.Shutdown()
-	}()
-
-	slog.Info("starting opencode-manager (legacy mode)", "db", dp)
-
-	if err := application.Start(ctx); err != nil {
-		cancel()
-		application.Shutdown()
-		slog.Error("application error", "error", err)
-	}
-
-	st.Close()
-}

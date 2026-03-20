@@ -2,8 +2,41 @@ package store
 
 import "time"
 
+// ── Domain types ────────────────────────────────────────────────────────────
+
+type Instance struct {
+	ID           string
+	Name         string
+	Directory    string
+	Port         int
+	Password     string
+	Status       string
+	AutoStart    bool
+	ProviderType string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type ClaudeSession struct {
+	ID           string
+	InstanceID   string
+	Title        string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	MessageCount int
+	WorktreePath string
+	Branch       string
+}
+
+type UserState struct {
+	UserID           int64
+	ActiveInstanceID string
+	ActiveSessionID  string
+}
+
+// ── Store interface ─────────────────────────────────────────────────────────
+
 // Store is the persistence interface for all application data.
-// Implementations: SQLiteStore (local), FirestoreStore (cloud).
 type Store interface {
 	// ── Instances ──
 
