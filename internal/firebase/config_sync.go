@@ -69,7 +69,7 @@ func (rc *RemoteConfig) WaitForConfig(ctx context.Context) (map[string]string, e
 					slog.Warn("firebase: failed to pull config after event", "error", err)
 					continue
 				}
-				if settings != nil && len(settings) > 0 {
+				if len(settings) > 0 {
 					slog.Info("firebase: config received", "keys", len(settings))
 					return settings, nil
 				}

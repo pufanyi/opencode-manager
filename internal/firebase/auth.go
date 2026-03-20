@@ -47,7 +47,9 @@ func (a *Auth) SignIn(email, password string) error {
 				Message string `json:"message"`
 			} `json:"error"`
 		}
-		json.NewDecoder(resp.Body).Decode(&errResp)
+		if decErr := json.NewDecoder(resp.Body).Decode(&errResp); decErr != nil {
+			return fmt.Errorf("firebase sign in failed: status %d", resp.StatusCode)
+		}
 		return fmt.Errorf("firebase sign in failed: %s", errResp.Error.Message)
 	}
 

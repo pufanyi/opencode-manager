@@ -183,12 +183,13 @@ func runSetup() {
 		fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
 		os.Exit(1)
 	}
-	defer st.Close()
 
 	if err := setup.Run(st); err != nil {
+		st.Close()
 		fmt.Fprintf(os.Stderr, "Setup failed: %v\n", err)
 		os.Exit(1)
 	}
+	st.Close()
 }
 
 func runServe() {
@@ -214,14 +215,12 @@ func runServe() {
 		Level: slog.LevelInfo,
 	})))
 
-	// Signal handling.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
 	if *legacyMode {
+		ctx, cancel := context.WithCancel(context.Background())
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		runLegacy(ctx, cancel, sigCh, *dbPathFlag, *devMode)
+		cancel()
 		return
 	}
 
@@ -237,6 +236,10 @@ func runServe() {
 		}
 		os.Exit(1)
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	slog.Info("connecting to Firebase...", "project", creds.Firebase.DatabaseURL)
 
@@ -259,7 +262,7 @@ func runServe() {
 		os.Exit(1)
 	}
 
-	if settings == nil || len(settings) == 0 {
+	if len(settings) == 0 {
 		slog.Info("no config found in Firebase — waiting for web frontend setup...")
 		slog.Info("open the web frontend and configure Telegram token, allowed users, etc.")
 		settings, err = remoteConfig.WaitForConfig(ctx)
@@ -296,7 +299,9 @@ func runServe() {
 	}
 
 	// Sync remote settings to local DB cache.
-	_ = st.SetSettings(settings)
+	if err := st.SetSettings(settings); err != nil {
+		slog.Warn("failed to cache settings locally", "error", err)
+	}
 
 	// Create and start application.
 	application, err := app.New(cfg, st, *devMode)

@@ -84,10 +84,12 @@ func (cl *CommandListener) handleEvent(ctx context.Context, evt SSEEvent) {
 	}
 
 	// Acknowledge.
-	cl.rtdb.Update(ctx, "commands/"+instanceID+"/"+commandID, map[string]interface{}{
+	if err := cl.rtdb.Update(ctx, "commands/"+instanceID+"/"+commandID, map[string]interface{}{
 		"status":     "ack",
 		"updated_at": time.Now().UnixMilli(),
-	})
+	}); err != nil {
+		slog.Warn("firebase: failed to ack command", "error", err)
+	}
 
 	slog.Info("firebase: executing command",
 		"instance", instanceID, "action", cmd.Action, "command", commandID)
@@ -110,7 +112,9 @@ func (cl *CommandListener) handleEvent(ctx context.Context, evt SSEEvent) {
 		}
 	}
 
-	cl.rtdb.Update(ctx, "commands/"+instanceID+"/"+commandID, update)
+	if err := cl.rtdb.Update(ctx, "commands/"+instanceID+"/"+commandID, update); err != nil {
+		slog.Warn("firebase: failed to update command status", "error", err)
+	}
 }
 
 func splitPath(path string) []string {

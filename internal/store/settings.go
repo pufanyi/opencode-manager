@@ -60,7 +60,7 @@ func (s *Store) SetSettings(settings map[string]string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(
 		`INSERT INTO settings (key, value) VALUES (?, ?)

@@ -62,17 +62,21 @@ func (p *Presence) markOffline(instanceIDs []string) {
 
 	now := time.Now().UnixMilli()
 	for _, id := range instanceIDs {
-		p.rtdb.Update(ctx, "presence/"+id, map[string]interface{}{
+		if err := p.rtdb.Update(ctx, "presence/"+id, map[string]interface{}{
 			"online":    false,
 			"last_seen": now,
-		})
+		}); err != nil {
+			slog.Warn("firebase: failed to mark offline", "instance", id, "error", err)
+		}
 	}
 }
 
-// UpdateInstances can be called when the instance list changes.
+// UpdateInstance can be called when the instance list changes.
 func (p *Presence) UpdateInstance(ctx context.Context, instanceID string, online bool) {
-	p.rtdb.Update(ctx, "presence/"+instanceID, map[string]interface{}{
+	if err := p.rtdb.Update(ctx, "presence/"+instanceID, map[string]interface{}{
 		"online":    online,
 		"last_seen": time.Now().UnixMilli(),
-	})
+	}); err != nil {
+		slog.Warn("firebase: failed to update presence", "instance", instanceID, "error", err)
+	}
 }

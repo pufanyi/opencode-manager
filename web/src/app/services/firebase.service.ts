@@ -2,10 +2,12 @@ import { Injectable, NgZone } from "@angular/core";
 import { type FirebaseApp, initializeApp } from "firebase/app";
 import {
   type Auth,
+  GoogleAuthProvider,
   createUserWithEmailAndPassword,
   getAuth,
   onAuthStateChanged,
   signInWithEmailAndPassword,
+  signInWithPopup,
   signOut,
   type User,
 } from "firebase/auth";
@@ -84,6 +86,10 @@ export class FirebaseService {
 
   async register(email: string, password: string): Promise<void> {
     await createUserWithEmailAndPassword(this.auth, email, password);
+  }
+
+  async loginWithGoogle(): Promise<void> {
+    await signInWithPopup(this.auth, new GoogleAuthProvider());
   }
 
   async logout(): Promise<void> {

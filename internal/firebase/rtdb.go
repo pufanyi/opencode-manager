@@ -61,7 +61,7 @@ func (r *RTDB) Set(ctx context.Context, path string, data interface{}) error {
 		return fmt.Errorf("RTDB set: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("RTDB set %s: status %d", path, resp.StatusCode)
@@ -92,7 +92,7 @@ func (r *RTDB) Update(ctx context.Context, path string, data map[string]interfac
 		return fmt.Errorf("RTDB update: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("RTDB update %s: status %d", path, resp.StatusCode)
@@ -117,7 +117,7 @@ func (r *RTDB) Delete(ctx context.Context, path string) error {
 		return fmt.Errorf("RTDB delete: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("RTDB delete %s: status %d", path, resp.StatusCode)
