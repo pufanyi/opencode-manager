@@ -2,8 +2,8 @@ import { Injectable, NgZone } from "@angular/core";
 import { type FirebaseApp, initializeApp } from "firebase/app";
 import {
   type Auth,
-  GoogleAuthProvider,
   createUserWithEmailAndPassword,
+  GoogleAuthProvider,
   getAuth,
   onAuthStateChanged,
   signInWithEmailAndPassword,
