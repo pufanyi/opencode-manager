@@ -8,11 +8,11 @@ export const authGuard: CanActivateFn = () => {
   const router = inject(Router);
 
   return firebase.user$.pipe(
-    filter((user) => user !== undefined),
+    filter((user) => user !== null), // skip null = "still loading"
     take(1),
     map((user) => {
-      if (user) return true;
-      return router.createUrlTree(["/login"]);
+      if (user) return true; // User object = authenticated
+      return router.createUrlTree(["/login"]); // false = checked, no user
     }),
   );
 };

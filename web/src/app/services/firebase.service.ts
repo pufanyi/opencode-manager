@@ -61,8 +61,9 @@ export class FirebaseService {
   private auth: Auth;
   private db: Database;
 
-  private userSubject = new BehaviorSubject<User | null>(null);
-  user$: Observable<User | null> = this.userSubject.asObservable();
+  // null = not yet checked, User | false = resolved
+  private userSubject = new BehaviorSubject<User | null | false>(null);
+  user$: Observable<User | null | false> = this.userSubject.asObservable();
 
   constructor(private zone: NgZone) {
     this.app = initializeApp(environment.firebase);
@@ -70,7 +71,7 @@ export class FirebaseService {
     this.db = getDatabase(this.app);
 
     onAuthStateChanged(this.auth, (user) => {
-      this.zone.run(() => this.userSubject.next(user));
+      this.zone.run(() => this.userSubject.next(user ?? false));
     });
   }
 

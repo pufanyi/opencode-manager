@@ -1,6 +1,8 @@
 import { Component, type OnDestroy, type OnInit } from "@angular/core";
 import { FormsModule } from "@angular/forms";
 import type { Unsubscribe } from "firebase/database";
+import type { Subscription } from "rxjs";
+import { filter, take } from "rxjs";
 import { FirebaseService, type Instance } from "../../services/firebase.service";
 import { InstanceCardComponent } from "../instance-card/instance-card.component";
 import { PromptPanelComponent } from "../prompt-panel/prompt-panel.component";
@@ -25,37 +27,45 @@ export class DashboardComponent implements OnInit, OnDestroy {
 
   private unsubInstances: Unsubscribe | null = null;
   private unsubLinkStatus: Unsubscribe | null = null;
+  private userSub: Subscription | null = null;
 
   constructor(private firebase: FirebaseService) {}
 
   ngOnInit() {
-    const user = this.firebase.currentUser;
-    if (user) {
-      this.unsubLinkStatus = this.firebase.onUserLinkStatus(user.uid, async (isLinked) => {
-        this.isLinked = isLinked;
-        if (!isLinked && !this.linkCode) {
-          try {
-            this.linkCode = await this.firebase.generateLinkCode(user.uid);
-          } catch (e) {
-            console.error("Failed to generate link code", e);
-          }
-        }
-        
-        // Start listening to instances only if linked
-        if (isLinked && !this.unsubInstances) {
-          this.unsubInstances = this.firebase.onInstances((instances) => {
-            this.instances = instances;
-            if (this.selectedInstance) {
-              const updated = instances.find((i) => i.id === this.selectedInstance!.id);
-              this.selectedInstance = updated || null;
+    // Wait for Firebase auth to resolve before setting up listeners
+    this.userSub = this.firebase.user$
+      .pipe(
+        filter((u) => u !== null), // skip "still loading"
+        take(1),
+      )
+      .subscribe((user) => {
+        if (!user) return; // false = no user, guard will redirect
+        this.unsubLinkStatus = this.firebase.onUserLinkStatus(user.uid, async (isLinked) => {
+          this.isLinked = isLinked;
+          if (!isLinked && !this.linkCode) {
+            try {
+              this.linkCode = await this.firebase.generateLinkCode(user.uid);
+            } catch (e) {
+              console.error("Failed to generate link code", e);
             }
-          });
-        }
+          }
+
+          // Start listening to instances only if linked
+          if (isLinked && !this.unsubInstances) {
+            this.unsubInstances = this.firebase.onInstances((instances) => {
+              this.instances = instances;
+              if (this.selectedInstance) {
+                const updated = instances.find((i) => i.id === this.selectedInstance!.id);
+                this.selectedInstance = updated || null;
+              }
+            });
+          }
+        });
       });
-    }
   }
 
   ngOnDestroy() {
+    this.userSub?.unsubscribe();
     this.unsubInstances?.();
     this.unsubLinkStatus?.();
   }
