@@ -7,3 +7,4 @@ web/node_modules/
 web/.angular/
 internal/web/dist/
 credentials.yaml
+opencode-manager.yaml

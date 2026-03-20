@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"gopkg.in/yaml.v3"
@@ -31,12 +33,109 @@ type credentialsFile struct {
 }
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "setup" {
-		runSetup()
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "login":
+			runLogin()
+			return
+		case "setup":
+			runSetup()
+			return
+		}
 	}
 
 	runServe()
+}
+
+func runLogin() {
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Println()
+	fmt.Println("  \033[1m\033[36m┌──────────────────────────────────────┐\033[0m")
+	fmt.Println("  \033[1m\033[36m│     OpenCode Manager Login           │\033[0m")
+	fmt.Println("  \033[1m\033[36m└──────────────────────────────────────┘\033[0m")
+	fmt.Println()
+
+	// Determine output path.
+	credPath := "./credentials.yaml"
+	if len(os.Args) > 2 {
+		credPath = os.Args[2]
+	}
+
+	// Check if credentials already exist.
+	if _, err := os.Stat(credPath); err == nil {
+		fmt.Printf("  \033[33m⚠ %s already exists. Overwrite? [y/N]: \033[0m", credPath)
+		ans, _ := reader.ReadString('\n')
+		ans = strings.TrimSpace(strings.ToLower(ans))
+		if ans != "y" && ans != "yes" {
+			fmt.Println("  Aborted.")
+			return
+		}
+		fmt.Println()
+	}
+
+	// Default Firebase project values (from environment.ts).
+	const defaultAPIKey = "AIzaSyCECBGZeLmLdi2a8Viii7iIoYksLKlDPPY"
+	const defaultDBURL = "https://opencode-manager-default-rtdb.firebaseio.com"
+
+	// Credentials.
+	fmt.Println("  \033[1mGo Server Account\033[0m")
+	fmt.Println("  \033[33mThe email/password for the Go server user in Firebase Auth.\033[0m")
+	fmt.Println()
+
+	email := promptInput(reader, "  Email: ")
+	password := promptPassword(reader, "  Password: ")
+	fmt.Println()
+
+	apiKey := defaultAPIKey
+	dbURL := defaultDBURL
+
+	// Verify by signing in.
+	fmt.Print("  Verifying credentials... ")
+	auth := firebase.NewAuth(apiKey)
+	if err := auth.SignIn(email, password); err != nil {
+		fmt.Printf("\033[31m✗ %s\033[0m\n", err)
+		fmt.Println()
+		fmt.Println("  \033[33mCheck your API key, database URL, and credentials.\033[0m")
+		fmt.Println("  \033[33mMake sure the user exists in Firebase Console → Authentication → Users.\033[0m")
+		os.Exit(1)
+	}
+	fmt.Println("\033[32m✓ Signed in successfully\033[0m")
+	fmt.Println()
+
+	// Write credentials file.
+	content := fmt.Sprintf(`firebase:
+  api_key: %q
+  database_url: %q
+  email: %q
+  password: %q
+`, apiKey, dbURL, email, password)
+
+	if err := os.WriteFile(credPath, []byte(content), 0600); err != nil {
+		fmt.Printf("  \033[31m✗ Failed to write %s: %v\033[0m\n", credPath, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("  \033[32m✓ Credentials saved to %s\033[0m\n", credPath)
+	fmt.Println()
+	fmt.Println("  \033[1mNext steps:\033[0m")
+	fmt.Println()
+	fmt.Printf("  1. Add config to Firebase RTDB (telegram.token, telegram.allowed_users)\n")
+	fmt.Printf("  2. Run: \033[36m./bin/opencode-manager\033[0m\n")
+	fmt.Println()
+}
+
+func promptInput(r *bufio.Reader, msg string) string {
+	fmt.Print(msg)
+	line, _ := r.ReadString('\n')
+	return strings.TrimSpace(line)
+}
+
+func promptPassword(r *bufio.Reader, msg string) string {
+	// Try to disable echo (best effort, falls back to plain input).
+	fmt.Print(msg)
+	line, _ := r.ReadString('\n')
+	return strings.TrimSpace(line)
 }
 
 func readCredentials(path string) (*credentialsFile, error) {
