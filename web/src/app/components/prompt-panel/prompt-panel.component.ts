@@ -1,187 +1,154 @@
 import {
-  Component,
-  type ElementRef,
-  Input,
-  inject,
-  NgZone,
-  type OnChanges,
-  type OnDestroy,
-  type SimpleChanges,
-  ViewChild,
-} from "@angular/core";
-import { FormsModule } from "@angular/forms";
-import {
-  ApiService,
-  type Instance,
-  type Session,
-  type StreamEvent,
-} from "../../services/api.service";
+	Component,
+	type ElementRef,
+	Input,
+	type OnChanges,
+	type OnDestroy,
+	type SimpleChanges,
+	ViewChild,
+} from '@angular/core';
+import { FormsModule } from '@angular/forms';
+import { FirebaseService, type Instance, type StreamData } from '../../services/firebase.service';
+import type { Unsubscribe } from 'firebase/database';
+
+interface Session {
+	ID: string;
+	Title: string;
+}
 
 @Component({
-  selector: "app-prompt-panel",
-  imports: [FormsModule],
-  templateUrl: "./prompt-panel.component.html",
-  styleUrl: "./prompt-panel.component.scss",
+	selector: 'app-prompt-panel',
+	standalone: true,
+	imports: [FormsModule],
+	templateUrl: './prompt-panel.component.html',
+	styleUrl: './prompt-panel.component.scss',
 })
 export class PromptPanelComponent implements OnChanges, OnDestroy {
-  private api = inject(ApiService);
-  private zone = inject(NgZone);
+	@Input() instance: Instance | null = null;
+	@ViewChild('responseArea') responseArea!: ElementRef<HTMLPreElement>;
 
-  @Input() instance: Instance | null = null;
-  @ViewChild("responseArea") responseArea!: ElementRef<HTMLPreElement>;
+	sessions: Session[] = [];
+	selectedSessionId = '';
+	promptText = '';
+	responseText = '';
+	streaming = false;
+	toolCalls: { name: string; status: string; detail: string }[] = [];
 
-  sessions: Session[] = [];
-  selectedSessionId = "";
-  promptText = "";
-  responseText = "";
-  streaming = false;
+	private unsubStream: Unsubscribe | null = null;
 
-  private eventSource: EventSource | null = null;
+	constructor(private firebase: FirebaseService) {}
 
-  ngOnChanges(changes: SimpleChanges): void {
-    if ("instance" in changes) {
-      this.closeSSE();
-      this.sessions = [];
-      this.selectedSessionId = "";
-      this.responseText = "";
-      this.streaming = false;
-      if (this.instance) {
-        this.loadSessions();
-      }
-    }
-  }
+	ngOnChanges(changes: SimpleChanges): void {
+		if ('instance' in changes) {
+			this.cleanup();
+			this.sessions = [];
+			this.selectedSessionId = '';
+			this.responseText = '';
+			this.streaming = false;
+			this.toolCalls = [];
+			if (this.instance) {
+				this.loadSessions();
+			}
+		}
+	}
 
-  ngOnDestroy(): void {
-    this.closeSSE();
-  }
+	ngOnDestroy(): void {
+		this.cleanup();
+	}
 
-  loadSessions(): void {
-    if (!this.instance) return;
-    this.api.getSessions(this.instance.id).subscribe({
-      next: (sessions) => {
-        this.sessions = sessions ?? [];
-        if (this.sessions.length > 0 && !this.selectedSessionId) {
-          this.selectedSessionId = this.sessions[0].ID;
-          this.connectSSE();
-        }
-      },
-      error: () => {
-        this.sessions = [];
-      },
-    });
-  }
+	async loadSessions() {
+		if (!this.instance) return;
+		try {
+			const result = await this.firebase.sendCommandAndWait(this.instance.id, 'list_sessions');
+			this.sessions = (result as Session[]) ?? [];
+			if (this.sessions.length > 0 && !this.selectedSessionId) {
+				this.selectedSessionId = this.sessions[0].ID;
+			}
+		} catch {
+			this.sessions = [];
+		}
+	}
 
-  createSession(): void {
-    if (!this.instance) return;
-    this.api.createSession(this.instance.id).subscribe({
-      next: (session) => {
-        this.sessions = [...this.sessions, session];
-        this.selectedSessionId = session.ID;
-        this.responseText = "";
-        this.connectSSE();
-      },
-    });
-  }
+	async createSession() {
+		if (!this.instance) return;
+		try {
+			const result = await this.firebase.sendCommandAndWait(this.instance.id, 'create_session');
+			const session = result as Session;
+			this.sessions = [...this.sessions, session];
+			this.selectedSessionId = session.ID;
+			this.responseText = '';
+			this.toolCalls = [];
+		} catch (e) {
+			console.error('Create session failed:', e);
+		}
+	}
 
-  onSessionChange(): void {
-    this.responseText = "";
-    this.connectSSE();
-  }
+	onSessionChange(): void {
+		this.responseText = '';
+		this.toolCalls = [];
+		this.cleanup();
+	}
 
-  sendPrompt(): void {
-    if (!this.instance || !this.selectedSessionId || !this.promptText.trim()) return;
-    this.streaming = true;
-    this.responseText = "";
-    this.api
-      .sendPrompt({
-        instance_id: this.instance.id,
-        session_id: this.selectedSessionId,
-        content: this.promptText.trim(),
-      })
-      .subscribe({
-        error: () => {
-          this.streaming = false;
-        },
-      });
-    this.promptText = "";
-  }
+	async sendPrompt() {
+		if (!this.instance || !this.selectedSessionId || !this.promptText.trim()) return;
 
-  abort(): void {
-    if (!this.instance || !this.selectedSessionId) return;
-    this.api
-      .abortPrompt({
-        instance_id: this.instance.id,
-        session_id: this.selectedSessionId,
-      })
-      .subscribe({
-        next: () => {
-          this.streaming = false;
-        },
-      });
-  }
+		this.streaming = true;
+		this.responseText = '';
+		this.toolCalls = [];
 
-  onKeyDown(event: KeyboardEvent): void {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      this.sendPrompt();
-    }
-  }
+		// Start listening to the stream BEFORE sending the command.
+		this.listenToStream(this.selectedSessionId);
 
-  private connectSSE(): void {
-    this.closeSSE();
-    if (!this.selectedSessionId) return;
+		try {
+			await this.firebase.sendCommand(this.instance.id, 'prompt', {
+				session_id: this.selectedSessionId,
+				content: this.promptText.trim(),
+			});
+		} catch {
+			this.streaming = false;
+		}
 
-    const es = this.api.connectSSE(this.selectedSessionId);
+		this.promptText = '';
+	}
 
-    es.onmessage = (msg: MessageEvent) => {
-      this.zone.run(() => {
-        try {
-          const data: StreamEvent = JSON.parse(msg.data);
-          const evt = data.event;
+	onKeyDown(event: KeyboardEvent): void {
+		if (event.key === 'Enter' && !event.shiftKey) {
+			event.preventDefault();
+			this.sendPrompt();
+		}
+	}
 
-          if (evt.Error) {
-            this.responseText += `\n[ERROR] ${evt.Error}\n`;
-            this.streaming = false;
-          } else if (evt.Text) {
-            this.responseText = evt.Text;
-          } else if (evt.ToolName) {
-            const state = evt.ToolState ?? "";
-            this.responseText += `\n[Tool: ${evt.ToolName}] ${state}\n`;
-          }
+	private listenToStream(sessionId: string) {
+		this.cleanup();
 
-          if (evt.Done) {
-            this.streaming = false;
-          }
+		this.unsubStream = this.firebase.onStream(sessionId, (data: StreamData | null) => {
+			if (!data) return;
 
-          this.scrollToBottom();
-        } catch {
-          // ignore non-JSON lines
-        }
-      });
-    };
+			this.responseText = data.content || '';
+			this.toolCalls = data.tool_calls || [];
 
-    es.onerror = () => {
-      this.zone.run(() => {
-        this.streaming = false;
-      });
-    };
+			if (data.status === 'complete' || data.status === 'error') {
+				this.streaming = false;
+				if (data.error) {
+					this.responseText += `\n\n[ERROR] ${data.error}`;
+				}
+			}
 
-    this.eventSource = es;
-  }
+			this.scrollToBottom();
+		});
+	}
 
-  private closeSSE(): void {
-    if (this.eventSource) {
-      this.eventSource.close();
-      this.eventSource = null;
-    }
-  }
+	private cleanup() {
+		this.unsubStream?.();
+		this.unsubStream = null;
+	}
 
-  private scrollToBottom(): void {
-    setTimeout(() => {
-      const el = this.responseArea?.nativeElement;
-      if (el) {
-        el.scrollTop = el.scrollHeight;
-      }
-    });
-  }
+	private scrollToBottom(): void {
+		setTimeout(() => {
+			const el = this.responseArea?.nativeElement;
+			if (el) {
+				el.scrollTop = el.scrollHeight;
+			}
+		});
+	}
 }

@@ -1,9 +1,12 @@
 <div class="dashboard">
   <header class="header">
     <h1 class="logo">OpenCode Manager</h1>
-    <button class="btn-primary" (click)="toggleNewForm()">
-      {{ showNewForm ? 'Cancel' : 'New Instance' }}
-    </button>
+    <div class="header-actions">
+      <button class="btn-primary" (click)="toggleNewForm()">
+        {{ showNewForm ? 'Cancel' : 'New Instance' }}
+      </button>
+      <button class="btn-ghost" (click)="logout()">Logout</button>
+    </div>
   </header>
 
   @if (showNewForm) {
@@ -34,6 +37,7 @@
     @for (inst of instances; track inst.id) {
       <app-instance-card
         [instance]="inst"
+        [selected]="selectedInstance?.id === inst.id"
         (selectInstance)="onSelect($event)"
         (startInstance)="onStart($event)"
         (stopInstance)="onStop($event)"

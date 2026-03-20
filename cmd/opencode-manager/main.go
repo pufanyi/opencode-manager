@@ -10,11 +10,25 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/pufanyi/opencode-manager/internal/app"
 	"github.com/pufanyi/opencode-manager/internal/config"
+	"github.com/pufanyi/opencode-manager/internal/firebase"
 	"github.com/pufanyi/opencode-manager/internal/setup"
 	"github.com/pufanyi/opencode-manager/internal/store"
 )
+
+// credentialsFile is the minimal local config — only Firebase connection info.
+type credentialsFile struct {
+	Firebase struct {
+		APIKey      string `yaml:"api_key"`
+		DatabaseURL string `yaml:"database_url"`
+		Email       string `yaml:"email"`
+		Password    string `yaml:"password"`
+	} `yaml:"firebase"`
+	DBPath string `yaml:"db_path"` // optional, defaults to ./data/opencode-manager.db
+}
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "setup" {
@@ -25,24 +39,16 @@ func main() {
 	runServe()
 }
 
-func getDBPath() string {
-	// Check flag
-	fs := flag.NewFlagSet("", flag.ContinueOnError)
-	dbFlag := fs.String("db", "", "path to database file")
-	_ = fs.String("config", "", "deprecated: config is now stored in database")
-	_ = fs.Bool("dev", false, "")
-	_ = fs.Parse(os.Args[1:])
-	if *dbFlag != "" {
-		return *dbFlag
+func readCredentials(path string) (*credentialsFile, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
-
-	// Check env
-	if v := os.Getenv("STORAGE_DATABASE"); v != "" {
-		return v
+	var creds credentialsFile
+	if err := yaml.Unmarshal(data, &creds); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
-
-	// Default
-	return "./data/opencode-manager.db"
+	return &creds, nil
 }
 
 func openStore(dbPath string) (*store.Store, error) {
@@ -53,10 +59,27 @@ func openStore(dbPath string) (*store.Store, error) {
 	return store.New(dbPath)
 }
 
-func runSetup() {
-	dbPath := getDBPath()
+func getDBPath(creds *credentialsFile, flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if v := os.Getenv("STORAGE_DATABASE"); v != "" {
+		return v
+	}
+	if creds != nil && creds.DBPath != "" {
+		return creds.DBPath
+	}
+	return "./data/opencode-manager.db"
+}
 
-	st, err := openStore(dbPath)
+// runSetup is the legacy interactive setup wizard (writes to local SQLite).
+func runSetup() {
+	fs := flag.NewFlagSet("setup", flag.ExitOnError)
+	dbFlag := fs.String("db", "", "path to database file")
+	_ = fs.Parse(os.Args[2:])
+
+	dp := getDBPath(nil, *dbFlag)
+	st, err := openStore(dp)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
 		os.Exit(1)
@@ -70,38 +93,141 @@ func runSetup() {
 }
 
 func runServe() {
-	dbPath := flag.String("db", "", "path to database file")
+	credPath := flag.String("credentials", "./credentials.yaml", "path to Firebase credentials file")
+	dbPathFlag := flag.String("db", "", "path to local database file (optional)")
 	devMode := flag.Bool("dev", false, "enable dev mode with Angular dev server (HMR)")
-	// Keep -config for backwards compatibility message
-	configPath := flag.String("config", "", "deprecated: config is now stored in database")
+	legacyMode := flag.Bool("legacy", false, "use local SQLite config instead of Firebase (backward compat)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: opencode-manager [command] [flags]\n\n")
 		fmt.Fprintf(os.Stderr, "Commands:\n")
-		fmt.Fprintf(os.Stderr, "  setup    Interactive setup wizard\n")
+		fmt.Fprintf(os.Stderr, "  setup    Interactive setup wizard (legacy, local config)\n")
 		fmt.Fprintf(os.Stderr, "  (none)   Start the manager (default)\n\n")
+		fmt.Fprintf(os.Stderr, "Modes:\n")
+		fmt.Fprintf(os.Stderr, "  Default:  Config from Firebase (needs credentials.yaml)\n")
+		fmt.Fprintf(os.Stderr, "  --legacy: Config from local SQLite database\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 
-	if *configPath != "" {
-		fmt.Fprintln(os.Stderr, "Warning: -config flag is deprecated. Config is now stored in the database.")
-		fmt.Fprintln(os.Stderr, "Run 'opencode-manager setup' to migrate your settings.")
-	}
-
-	// Setup structured logging
+	// Setup structured logging.
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
 
-	// Determine DB path
-	dp := *dbPath
-	if dp == "" {
-		dp = os.Getenv("STORAGE_DATABASE")
+	// Signal handling.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	if *legacyMode {
+		runLegacy(ctx, cancel, sigCh, *dbPathFlag, *devMode)
+		return
 	}
-	if dp == "" {
-		dp = "./data/opencode-manager.db"
+
+	// ── Cloud-first boot ────────────────────────────────────────────────
+	creds, err := readCredentials(*credPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			slog.Error("credentials file not found",
+				"path", *credPath,
+				"hint", "copy credentials.yaml.example to credentials.yaml and fill in your Firebase project info")
+		} else {
+			slog.Error("failed to read credentials", "error", err)
+		}
+		os.Exit(1)
 	}
+
+	slog.Info("connecting to Firebase...", "project", creds.Firebase.DatabaseURL)
+
+	fbClient, err := firebase.NewClient(firebase.Config{
+		APIKey:      creds.Firebase.APIKey,
+		DatabaseURL: creds.Firebase.DatabaseURL,
+		Email:       creds.Firebase.Email,
+		Password:    creds.Firebase.Password,
+	})
+	if err != nil {
+		slog.Error("firebase connection failed", "error", err)
+		os.Exit(1)
+	}
+
+	// Pull config from Firebase.
+	remoteConfig := firebase.NewRemoteConfig(fbClient.RTDB)
+	settings, err := remoteConfig.Pull(ctx)
+	if err != nil {
+		slog.Error("failed to pull config from Firebase", "error", err)
+		os.Exit(1)
+	}
+
+	if settings == nil || len(settings) == 0 {
+		slog.Info("no config found in Firebase — waiting for web frontend setup...")
+		slog.Info("open the web frontend and configure Telegram token, allowed users, etc.")
+		settings, err = remoteConfig.WaitForConfig(ctx)
+		if err != nil {
+			slog.Error("waiting for config failed", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	slog.Info("config loaded from Firebase", "keys", len(settings))
+
+	// Build config from remote settings.
+	cfg := config.LoadFromSettings(settings)
+	config.ApplyEnvOverrides(cfg)
+
+	// Force Firebase enabled with credentials from file.
+	cfg.Firebase.Enabled = true
+	cfg.Firebase.APIKey = creds.Firebase.APIKey
+	cfg.Firebase.DatabaseURL = creds.Firebase.DatabaseURL
+	cfg.Firebase.Email = creds.Firebase.Email
+	cfg.Firebase.Password = creds.Firebase.Password
+
+	if err := config.Validate(cfg); err != nil {
+		slog.Error("config validation failed", "error", err)
+		os.Exit(1)
+	}
+
+	// Open local SQLite for state cache (instances, sessions).
+	dp := getDBPath(creds, *dbPathFlag)
+	st, err := openStore(dp)
+	if err != nil {
+		slog.Error("failed to open local database", "error", err)
+		os.Exit(1)
+	}
+
+	// Sync remote settings to local DB cache.
+	_ = st.SetSettings(settings)
+
+	// Create and start application.
+	application, err := app.New(cfg, st, *devMode)
+	if err != nil {
+		slog.Error("failed to initialize application", "error", err)
+		st.Close()
+		os.Exit(1)
+	}
+
+	go func() {
+		sig := <-sigCh
+		slog.Info("received signal", "signal", sig)
+		cancel()
+		application.Shutdown()
+	}()
+
+	slog.Info("starting opencode-manager (cloud mode)", "db", dp)
+
+	if err := application.Start(ctx); err != nil {
+		cancel()
+		application.Shutdown()
+		slog.Error("application error", "error", err)
+	}
+
+	st.Close()
+}
+
+// runLegacy is the original boot path: config from local SQLite.
+func runLegacy(ctx context.Context, cancel context.CancelFunc, sigCh <-chan os.Signal, dbPathFlag string, devMode bool) {
+	dp := getDBPath(nil, dbPathFlag)
 
 	st, err := openStore(dp)
 	if err != nil {
@@ -109,7 +235,6 @@ func runServe() {
 		os.Exit(1)
 	}
 
-	// Check if settings exist; if not, run interactive setup
 	hasSettings, err := st.HasSettings()
 	if err != nil {
 		slog.Error("failed to check settings", "error", err)
@@ -126,7 +251,6 @@ func runServe() {
 		}
 	}
 
-	// Load config from DB
 	settings, err := st.GetAllSettings()
 	if err != nil {
 		slog.Error("failed to load settings", "error", err)
@@ -143,20 +267,12 @@ func runServe() {
 		os.Exit(1)
 	}
 
-	// Create application
-	application, err := app.New(cfg, st, *devMode)
+	application, err := app.New(cfg, st, devMode)
 	if err != nil {
 		slog.Error("failed to initialize application", "error", err)
 		st.Close()
 		os.Exit(1)
 	}
-
-	// Setup signal handling
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		sig := <-sigCh
@@ -165,11 +281,13 @@ func runServe() {
 		application.Shutdown()
 	}()
 
-	slog.Info("starting opencode-manager", "db", dp)
+	slog.Info("starting opencode-manager (legacy mode)", "db", dp)
 
 	if err := application.Start(ctx); err != nil {
 		cancel()
 		application.Shutdown()
 		slog.Error("application error", "error", err)
 	}
+
+	st.Close()
 }

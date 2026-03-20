@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pufanyi/opencode-manager/internal/firebase"
 	"github.com/pufanyi/opencode-manager/internal/provider"
 	"github.com/pufanyi/opencode-manager/internal/store"
 )
@@ -26,6 +27,7 @@ type Manager struct {
 	healthInterval   time.Duration
 	maxRestarts      int
 	onCrash          CrashCallback
+	fbStreamer       *firebase.Streamer
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -48,6 +50,19 @@ func NewManager(ctx context.Context, opencodeBinary, claudeCodeBinary string, po
 
 func (m *Manager) SetCrashCallback(cb CrashCallback) {
 	m.onCrash = cb
+}
+
+// SetFirebaseStreamer sets the Firebase streamer for real-time event streaming.
+func (m *Manager) SetFirebaseStreamer(s *firebase.Streamer) {
+	m.fbStreamer = s
+}
+
+// WrapEventsIfFirebase wraps an event channel with Firebase streaming if configured.
+func (m *Manager) WrapEventsIfFirebase(sessionID string, ch <-chan provider.StreamEvent) <-chan provider.StreamEvent {
+	if m.fbStreamer == nil {
+		return ch
+	}
+	return m.fbStreamer.WrapEvents(m.ctx, sessionID, ch)
 }
 
 func (m *Manager) CreateAndStart(name, directory string, autoStart bool, providerType provider.Type) (*Instance, error) {

@@ -801,6 +801,9 @@ func (h *Handlers) startPrompt(ctx context.Context, b *bot.Bot, inst *process.In
 		return
 	}
 
+	// Wrap with Firebase streaming if configured.
+	ch = h.procMgr.WrapEventsIfFirebase(sessionID, ch)
+
 	abortFunc := func() { _ = inst.Provider.Abort(context.Background(), sessionID) }
 	sc := h.streamMgr.StartStream(b, h.store, chatID, sessionID, inst.Name, sessionTitle, inst.Directory, replyMsgID, ch, promptCancel, abortFunc)
 	for _, f := range cleanupFiles {

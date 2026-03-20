@@ -339,6 +339,9 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Wrap with Firebase streaming if configured.
+	ch = s.procMgr.WrapEventsIfFirebase(req.SessionID, ch)
+
 	// Broadcast events to WebSocket clients
 	go func() {
 		for evt := range ch {

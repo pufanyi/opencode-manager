@@ -12,6 +12,15 @@ type Config struct {
 	Telegram TelegramConfig
 	Process  ProcessConfig
 	Web      WebConfig
+	Firebase FirebaseConfig
+}
+
+type FirebaseConfig struct {
+	Enabled     bool
+	APIKey      string
+	DatabaseURL string
+	Email       string // Go client service account email
+	Password    string // Go client service account password
 }
 
 type WebConfig struct {
@@ -102,6 +111,23 @@ func LoadFromSettings(settings map[string]string) *Config {
 		cfg.Web.Addr = v
 	}
 
+	// Firebase
+	if v, ok := settings["firebase.enabled"]; ok {
+		cfg.Firebase.Enabled = v == "true"
+	}
+	if v, ok := settings["firebase.api_key"]; ok {
+		cfg.Firebase.APIKey = v
+	}
+	if v, ok := settings["firebase.database_url"]; ok {
+		cfg.Firebase.DatabaseURL = v
+	}
+	if v, ok := settings["firebase.email"]; ok {
+		cfg.Firebase.Email = v
+	}
+	if v, ok := settings["firebase.password"]; ok {
+		cfg.Firebase.Password = v
+	}
+
 	return cfg
 }
 
@@ -119,6 +145,11 @@ func (c *Config) ToSettings() map[string]string {
 		"process.max_restart_attempts":  strconv.Itoa(c.Process.MaxRestartAttempts),
 		"web.enabled":                   strconv.FormatBool(c.Web.Enabled),
 		"web.addr":                      c.Web.Addr,
+		"firebase.enabled":              strconv.FormatBool(c.Firebase.Enabled),
+		"firebase.api_key":              c.Firebase.APIKey,
+		"firebase.database_url":         c.Firebase.DatabaseURL,
+		"firebase.email":                c.Firebase.Email,
+		"firebase.password":             c.Firebase.Password,
 	}
 	return m
 }
@@ -138,6 +169,21 @@ func ApplyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("CLAUDECODE_BINARY"); v != "" {
 		cfg.Process.ClaudeCodeBinary = v
+	}
+	if v := os.Getenv("FIREBASE_API_KEY"); v != "" {
+		cfg.Firebase.APIKey = v
+	}
+	if v := os.Getenv("FIREBASE_DATABASE_URL"); v != "" {
+		cfg.Firebase.DatabaseURL = v
+	}
+	if v := os.Getenv("FIREBASE_EMAIL"); v != "" {
+		cfg.Firebase.Email = v
+	}
+	if v := os.Getenv("FIREBASE_PASSWORD"); v != "" {
+		cfg.Firebase.Password = v
+	}
+	if v := os.Getenv("FIREBASE_ENABLED"); v == "true" {
+		cfg.Firebase.Enabled = true
 	}
 }
 

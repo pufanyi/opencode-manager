@@ -33,6 +33,40 @@
   }
 }
 
+.tool-calls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-primary);
+}
+
+.tool-call {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: rgba(88, 166, 255, 0.08);
+  border: 1px solid rgba(88, 166, 255, 0.15);
+
+  &.done {
+    background: rgba(63, 185, 80, 0.08);
+    border-color: rgba(63, 185, 80, 0.15);
+  }
+
+  &.error {
+    background: rgba(248, 81, 73, 0.08);
+    border-color: rgba(248, 81, 73, 0.15);
+  }
+}
+
+.tool-icon { font-size: 12px; }
+.tool-name { color: var(--text-primary); font-weight: 500; }
+.tool-detail { color: var(--text-muted); margin-left: 4px; }
+
 .response-container {
   flex: 1;
   min-height: 200px;

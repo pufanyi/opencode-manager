@@ -15,6 +15,24 @@
       </div>
     </div>
 
+    @if (toolCalls.length > 0) {
+      <div class="tool-calls">
+        @for (tool of toolCalls; track tool.name + tool.status) {
+          <div class="tool-call" [class.running]="tool.status === 'running'" [class.done]="tool.status === 'completed'" [class.error]="tool.status === 'error'">
+            <span class="tool-icon">
+              @if (tool.status === 'running') { ⏳ }
+              @else if (tool.status === 'completed') { ✅ }
+              @else if (tool.status === 'error') { ❌ }
+            </span>
+            <span class="tool-name">{{ tool.name }}</span>
+            @if (tool.detail) {
+              <span class="tool-detail">{{ tool.detail }}</span>
+            }
+          </div>
+        }
+      </div>
+    }
+
     <div class="response-container">
       <pre #responseArea class="response-area">{{ responseText || 'Waiting for response...' }}</pre>
     </div>
@@ -33,11 +51,8 @@
           (click)="sendPrompt()"
           [disabled]="!selectedSessionId || !promptText.trim() || streaming"
         >
-          Send
+          {{ streaming ? 'Streaming...' : 'Send' }}
         </button>
-        @if (streaming) {
-          <button class="btn-danger" (click)="abort()">Abort</button>
-        }
       </div>
     </div>
   </div>

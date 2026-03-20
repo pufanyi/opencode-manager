@@ -1,4 +1,11 @@
-<div class="card" role="button" tabindex="0" (click)="selectInstance.emit(instance)" (keydown.enter)="selectInstance.emit(instance)">
+<div
+  class="card"
+  [class.selected]="selected"
+  role="button"
+  tabindex="0"
+  (click)="selectInstance.emit(instance)"
+  (keydown.enter)="selectInstance.emit(instance)"
+>
   <div class="card-header">
     <div class="card-title-row">
       <span class="status-dot" [style.background]="statusColor"></span>
@@ -12,12 +19,8 @@
 
   <div class="card-body">
     <div class="directory" [title]="instance.directory">{{ instance.directory }}</div>
-    @if (instance.port) {
-      <div class="port">Port: {{ instance.port }}</div>
-    }
   </div>
 
-  <!-- eslint-disable-next-line @angular-eslint/template/click-events-have-key-events, @angular-eslint/template/interactive-supports-focus -->
   <div class="card-actions" (click)="$event.stopPropagation()">
     @if (!isRunning) {
       <button class="btn-success btn-sm" (click)="startInstance.emit(instance)">Start</button>
@@ -26,6 +29,5 @@
       <button class="btn-warning btn-sm" (click)="stopInstance.emit(instance)">Stop</button>
     }
     <button class="btn-danger btn-sm" (click)="deleteInstance.emit(instance)">Delete</button>
-    <button class="btn-primary btn-sm" (click)="selectInstance.emit(instance)">Select</button>
   </div>
 </div>

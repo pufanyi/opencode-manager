@@ -14,6 +14,11 @@
     border-color: var(--accent-blue);
     box-shadow: var(--shadow-elevated);
   }
+
+  &.selected {
+    border-color: var(--accent-blue);
+    box-shadow: 0 0 0 1px var(--accent-blue);
+  }
 }
 
 .card-header {

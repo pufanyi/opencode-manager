@@ -1,0 +1,29 @@
+telegram:
+  token: "8695613004:AAFIyKvkiowZBmul9sgpmpqnmPctPhEYdgE"
+  allowed_users: [5060339889]
+
+process:
+  opencode_binary: "/mnt/aigc/users/pufanyi/.nvm/versions/node/v22.19.0/bin/opencode"
+  port_range:
+    start: 14096
+    end: 14196
+  health_check_interval: 30s
+  max_restart_attempts: 3
+
+projects:
+  - name: "opencode-manager"
+    directory: "/mnt/umm/users/pufanyi/workspace/opencode-manager"
+    auto_start: true
+  - name: "FYP"
+    directory: "/mnt/umm/users/pufanyi/workspace/FYP"
+    auto_start: true
+  - name: "typst-writer"
+    directory: "/mnt/umm/users/pufanyi/workspace/typst-writer"
+    auto_start: true
+  - name: "vibe-a"
+    directory: "/mnt/umm/users/pufanyi/workspace/vibe-a-platform"
+    auto_start: true
+  
+
+storage:
+  database: "./data/opencode-manager.db"
