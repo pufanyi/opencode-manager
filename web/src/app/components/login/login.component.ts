@@ -1,13 +1,13 @@
-import { Component } from '@angular/core';
-import { Router } from '@angular/router';
-import { FormsModule } from '@angular/forms';
-import { FirebaseService } from '../../services/firebase.service';
+import { Component } from "@angular/core";
+import { FormsModule } from "@angular/forms";
+import { Router } from "@angular/router";
+import { FirebaseService } from "../../services/firebase.service";
 
 @Component({
-	selector: 'app-login',
-	standalone: true,
-	imports: [FormsModule],
-	template: `
+  selector: "app-login",
+  standalone: true,
+  imports: [FormsModule],
+  template: `
 		<div class="login-container">
 			<div class="login-card">
 				<h1>OpenCode Manager</h1>
@@ -48,7 +48,8 @@ import { FirebaseService } from '../../services/firebase.service';
 			</div>
 		</div>
 	`,
-	styles: [`
+  styles: [
+    `
 		.login-container {
 			display: flex;
 			align-items: center;
@@ -132,35 +133,36 @@ import { FirebaseService } from '../../services/firebase.service';
 				&:hover { text-decoration: underline; }
 			}
 		}
-	`],
+	`,
+  ],
 })
 export class LoginComponent {
-	email = '';
-	password = '';
-	error = '';
-	loading = false;
-	isRegister = false;
+  email = "";
+  password = "";
+  error = "";
+  loading = false;
+  isRegister = false;
 
-	constructor(
-		private firebase: FirebaseService,
-		private router: Router,
-	) {}
+  constructor(
+    private firebase: FirebaseService,
+    private router: Router,
+  ) {}
 
-	async submit() {
-		this.error = '';
-		this.loading = true;
+  async submit() {
+    this.error = "";
+    this.loading = true;
 
-		try {
-			if (this.isRegister) {
-				await this.firebase.register(this.email, this.password);
-			} else {
-				await this.firebase.login(this.email, this.password);
-			}
-			this.router.navigate(['/']);
-		} catch (e: unknown) {
-			this.error = (e as Error).message || 'Authentication failed';
-		} finally {
-			this.loading = false;
-		}
-	}
+    try {
+      if (this.isRegister) {
+        await this.firebase.register(this.email, this.password);
+      } else {
+        await this.firebase.login(this.email, this.password);
+      }
+      this.router.navigate(["/"]);
+    } catch (e: unknown) {
+      this.error = (e as Error).message || "Authentication failed";
+    } finally {
+      this.loading = false;
+    }
+  }
 }
