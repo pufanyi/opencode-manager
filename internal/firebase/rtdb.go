@@ -30,27 +30,29 @@ func (r *RTDB) url(path string) string {
 	return fmt.Sprintf("%s/%s.json", r.baseURL, strings.TrimPrefix(path, "/"))
 }
 
-func (r *RTDB) authURL(path string) (string, error) {
+// newRequest creates an authenticated request with Bearer token.
+func (r *RTDB) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
 	token, err := r.auth.Token()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return r.url(path) + "?auth=" + token, nil
+
+	req, err := http.NewRequestWithContext(ctx, method, r.url(path), body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return req, nil
 }
 
 // Set writes data at the given path (PUT — replaces entirely).
 func (r *RTDB) Set(ctx context.Context, path string, data interface{}) error {
-	u, err := r.authURL(path)
-	if err != nil {
-		return err
-	}
-
 	body, err := json.Marshal(data)
 	if err != nil {
 		return fmt.Errorf("marshaling data: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "PUT", u, bytes.NewReader(body))
+	req, err := r.newRequest(ctx, "PUT", path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -71,17 +73,12 @@ func (r *RTDB) Set(ctx context.Context, path string, data interface{}) error {
 
 // Update merges data at the given path (PATCH — partial update).
 func (r *RTDB) Update(ctx context.Context, path string, data map[string]interface{}) error {
-	u, err := r.authURL(path)
-	if err != nil {
-		return err
-	}
-
 	body, err := json.Marshal(data)
 	if err != nil {
 		return fmt.Errorf("marshaling data: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "PATCH", u, bytes.NewReader(body))
+	req, err := r.newRequest(ctx, "PATCH", path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -102,12 +99,7 @@ func (r *RTDB) Update(ctx context.Context, path string, data map[string]interfac
 
 // Delete removes data at the given path.
 func (r *RTDB) Delete(ctx context.Context, path string) error {
-	u, err := r.authURL(path)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "DELETE", u, nil)
+	req, err := r.newRequest(ctx, "DELETE", path, nil)
 	if err != nil {
 		return err
 	}
@@ -127,12 +119,7 @@ func (r *RTDB) Delete(ctx context.Context, path string) error {
 
 // Get reads data at the given path.
 func (r *RTDB) Get(ctx context.Context, path string, dest interface{}) error {
-	u, err := r.authURL(path)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	req, err := r.newRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return err
 	}
@@ -176,12 +163,7 @@ func (r *RTDB) Listen(ctx context.Context, path string, events chan<- SSEEvent) 
 }
 
 func (r *RTDB) listenOnce(ctx context.Context, path string, events chan<- SSEEvent) error {
-	u, err := r.authURL(path)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	req, err := r.newRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return err
 	}

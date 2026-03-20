@@ -70,12 +70,14 @@ type loginResult struct {
 	UID          string `json:"uid"`
 }
 
+const totalLoginSteps = 4
+
 func runLogin() {
 	reader := bufio.NewReader(os.Stdin)
 
 	fmt.Println()
 	fmt.Println("  \033[1m\033[36m┌──────────────────────────────────────┐\033[0m")
-	fmt.Println("  \033[1m\033[36m│     OpenCode Manager Login           │\033[0m")
+	fmt.Println("  \033[1m\033[36m│     OpenCode Manager Setup           │\033[0m")
 	fmt.Println("  \033[1m\033[36m└──────────────────────────────────────┘\033[0m")
 	fmt.Println()
 
@@ -95,10 +97,128 @@ func runLogin() {
 		fmt.Println()
 	}
 
-	// Start local server for OAuth callback.
+	// ── Step 1: Browser login ──────────────────────────────────────────
+	printLoginStep(1, "Sign in to Firebase")
+	fmt.Println("  \033[33mA browser window will open. Sign in with Google or email.\033[0m")
+	fmt.Println()
+
+	refreshToken, email := doBrowserLogin()
+	printOK("Signed in as %s", email)
+	fmt.Println()
+
+	// Connect to Firebase for subsequent steps.
+	fbAuth := firebase.NewAuth(defaultAPIKey)
+	if err := fbAuth.SignInWithRefreshToken(refreshToken); err != nil {
+		printFail("Token verification failed: %v", err)
+		os.Exit(1)
+	}
+	rtdb := firebase.NewRTDB(defaultDBURL, fbAuth)
+	ctx := context.Background()
+
+	// Check for existing config.
+	remoteConfig := firebase.NewRemoteConfig(rtdb)
+	existing, _ := remoteConfig.Pull(ctx)
+
+	// ── Step 2: Telegram Bot ───────────────────────────────────────────
+	printLoginStep(2, "Telegram Bot")
+	fmt.Println("  \033[33mCreate a bot via @BotFather on Telegram to get your token.\033[0m")
+	fmt.Println()
+
+	defaultToken := existing["telegram.token"]
+	tokenDisplay := ""
+	if defaultToken != "" {
+		tokenDisplay = maskToken(defaultToken)
+	}
+	token := promptWithDefault(reader, "Bot token", defaultToken, tokenDisplay)
+	if token == "" {
+		token = defaultToken
+	}
+
+	defaultUsers := existing["telegram.allowed_users"]
+	fmt.Println("  \033[33mSend /start to @userinfobot to find your Telegram user ID.\033[0m")
+	users := promptWithDefault(reader, "Allowed user IDs (comma-separated)", defaultUsers, "")
+	if users == "" {
+		users = defaultUsers
+	}
+	printOK("Telegram configured")
+	fmt.Println()
+
+	// ── Step 3: Binary paths ───────────────────────────────────────────
+	printLoginStep(3, "AI Coding Tools")
+
+	claudeBin := detectBinary("claude", "Claude Code")
+	defaultClaude := existing["process.claudecode_binary"]
+	if defaultClaude == "" {
+		defaultClaude = claudeBin
+	}
+	claudePath := promptWithDefault(reader, "Claude Code binary", defaultClaude, "")
+	if claudePath == "" {
+		claudePath = defaultClaude
+	}
+
+	opencodeBin := detectBinary("opencode", "OpenCode")
+	defaultOpencode := existing["process.opencode_binary"]
+	if defaultOpencode == "" {
+		defaultOpencode = opencodeBin
+	}
+	opencodePath := promptWithDefault(reader, "OpenCode binary", defaultOpencode, "")
+	if opencodePath == "" {
+		opencodePath = defaultOpencode
+	}
+
+	printOK("Tools configured")
+	fmt.Println()
+
+	// ── Step 4: Save everything ────────────────────────────────────────
+	printLoginStep(4, "Save configuration")
+
+	// Save credentials locally.
+	content := fmt.Sprintf(`firebase:
+  api_key: %q
+  database_url: %q
+  refresh_token: %q
+`, defaultAPIKey, defaultDBURL, refreshToken)
+
+	if err := os.WriteFile(credPath, []byte(content), 0600); err != nil {
+		printFail("Failed to write %s: %v", credPath, err)
+		os.Exit(1)
+	}
+	printOK("Credentials saved to %s", credPath)
+
+	// Push config to Firebase.
+	settings := map[string]string{
+		"telegram.token":          token,
+		"telegram.allowed_users":  users,
+		"process.claudecode_binary": claudePath,
+		"process.opencode_binary":  opencodePath,
+	}
+	// Preserve existing settings not covered by this wizard.
+	for k, v := range existing {
+		if _, overridden := settings[k]; !overridden {
+			settings[k] = v
+		}
+	}
+
+	if err := remoteConfig.Push(ctx, settings); err != nil {
+		printFail("Failed to push config to Firebase: %v", err)
+		os.Exit(1)
+	}
+	printOK("Config pushed to Firebase (%d keys)", len(settings))
+	fmt.Println()
+
+	// ── Done ───────────────────────────────────────────────────────────
+	fmt.Println("  \033[1m\033[32m┌──────────────────────────────────────┐\033[0m")
+	fmt.Println("  \033[1m\033[32m│           Setup Complete!            │\033[0m")
+	fmt.Println("  \033[1m\033[32m└──────────────────────────────────────┘\033[0m")
+	fmt.Println()
+	fmt.Printf("  Run: \033[36m%s\033[0m\n", os.Args[0])
+	fmt.Println()
+}
+
+func doBrowserLogin() (refreshToken, email string) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		fmt.Printf("  \033[31mFailed to start local server: %v\033[0m\n", err)
+		printFail("Failed to start local server: %v", err)
 		os.Exit(1)
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
@@ -106,7 +226,6 @@ func runLogin() {
 	resultCh := make(chan loginResult, 1)
 	mux := http.NewServeMux()
 
-	// Serve the login page.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		page := loginpage.HTML
 		page = strings.ReplaceAll(page, "{{API_KEY}}", defaultAPIKey)
@@ -117,7 +236,6 @@ func runLogin() {
 		fmt.Fprint(w, page)
 	})
 
-	// Receive token from browser.
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.Error(w, "POST only", 405)
@@ -141,44 +259,55 @@ func runLogin() {
 	}()
 
 	url := fmt.Sprintf("http://localhost:%d", port)
-	fmt.Printf("  Opening browser at \033[36m%s\033[0m\n", url)
-	fmt.Println("  \033[33mSign in with Google or email in the browser window.\033[0m")
-	fmt.Println()
+	fmt.Printf("  Opening browser at \033[36m%s\033[0m ...\n", url)
 	openBrowser(url)
 
-	// Wait for the callback.
 	fmt.Print("  Waiting for sign-in... ")
 	result := <-resultCh
 	_ = server.Close()
 
-	// Verify the refresh token works.
-	auth := firebase.NewAuth(defaultAPIKey)
-	if err := auth.SignInWithRefreshToken(result.RefreshToken); err != nil {
-		fmt.Printf("\033[31m! %s\033[0m\n", err)
-		os.Exit(1)
+	return result.RefreshToken, result.Email
+}
+
+func detectBinary(name, label string) string {
+	if p, err := exec.LookPath(name); err == nil {
+		printOK("Detected %s: %s", label, p)
+		return p
 	}
-	fmt.Printf("\033[32m! Signed in as %s\033[0m\n", result.Email)
-	fmt.Println()
+	return name // fallback to just the name
+}
 
-	// Write credentials file.
-	content := fmt.Sprintf(`firebase:
-  api_key: %q
-  database_url: %q
-  refresh_token: %q
-`, defaultAPIKey, defaultDBURL, result.RefreshToken)
-
-	if err := os.WriteFile(credPath, []byte(content), 0600); err != nil {
-		fmt.Printf("  \033[31mFailed to write %s: %v\033[0m\n", credPath, err)
-		os.Exit(1)
+func promptWithDefault(r *bufio.Reader, prompt, defaultVal, displayOverride string) string {
+	display := defaultVal
+	if displayOverride != "" {
+		display = displayOverride
 	}
+	if display != "" {
+		fmt.Printf("  %s [\033[36m%s\033[0m]: ", prompt, display)
+	} else {
+		fmt.Printf("  %s: ", prompt)
+	}
+	line, _ := r.ReadString('\n')
+	return strings.TrimSpace(line)
+}
 
-	fmt.Printf("  \033[32m! Credentials saved to %s\033[0m\n", credPath)
-	fmt.Println()
-	fmt.Println("  \033[1mNext steps:\033[0m")
-	fmt.Println()
-	fmt.Printf("  1. Add config to Firebase RTDB (telegram.token, telegram.allowed_users)\n")
-	fmt.Printf("  2. Run: \033[36m./bin/opencode-manager\033[0m\n")
-	fmt.Println()
+func maskToken(token string) string {
+	if len(token) < 10 {
+		return "****"
+	}
+	return token[:6] + "..." + token[len(token)-4:]
+}
+
+func printLoginStep(n int, title string) {
+	fmt.Printf("  \033[1mStep %d/%d: %s\033[0m\n", n, totalLoginSteps, title)
+}
+
+func printOK(format string, args ...any) {
+	fmt.Printf("  \033[32m✓ %s\033[0m\n", fmt.Sprintf(format, args...))
+}
+
+func printFail(format string, args ...any) {
+	fmt.Printf("  \033[31m✗ %s\033[0m\n", fmt.Sprintf(format, args...))
 }
 
 func openBrowser(url string) {
