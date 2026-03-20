@@ -68,6 +68,7 @@ func New(cfg *config.Config, st *store.Store, devMode bool) (*App, error) {
 			slog.Error("firebase initialization failed (continuing without)", "error", err)
 		} else {
 			app.firebase = fbClient
+			app.bot.SetFirebase(fbClient)
 			procMgr.SetFirebaseStreamer(fbClient.Streamer)
 		}
 	}

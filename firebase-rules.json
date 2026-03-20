@@ -27,6 +27,14 @@
         ".read": "auth != null",
         ".write": "auth != null"
       }
+    },
+    "link_codes": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "users": {
+      ".read": "auth != null",
+      ".write": "auth != null"
     }
   }
 }

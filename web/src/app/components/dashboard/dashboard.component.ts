@@ -20,22 +20,44 @@ export class DashboardComponent implements OnInit, OnDestroy {
   newDirectory = "";
   newProvider = "claudecode";
 
+  isLinked: boolean | null = null;
+  linkCode: string | null = null;
+
   private unsubInstances: Unsubscribe | null = null;
+  private unsubLinkStatus: Unsubscribe | null = null;
 
   constructor(private firebase: FirebaseService) {}
 
   ngOnInit() {
-    this.unsubInstances = this.firebase.onInstances((instances) => {
-      this.instances = instances;
-      if (this.selectedInstance) {
-        const updated = instances.find((i) => i.id === this.selectedInstance!.id);
-        this.selectedInstance = updated || null;
-      }
-    });
+    const user = this.firebase.currentUser;
+    if (user) {
+      this.unsubLinkStatus = this.firebase.onUserLinkStatus(user.uid, async (isLinked) => {
+        this.isLinked = isLinked;
+        if (!isLinked && !this.linkCode) {
+          try {
+            this.linkCode = await this.firebase.generateLinkCode(user.uid);
+          } catch (e) {
+            console.error("Failed to generate link code", e);
+          }
+        }
+        
+        // Start listening to instances only if linked
+        if (isLinked && !this.unsubInstances) {
+          this.unsubInstances = this.firebase.onInstances((instances) => {
+            this.instances = instances;
+            if (this.selectedInstance) {
+              const updated = instances.find((i) => i.id === this.selectedInstance!.id);
+              this.selectedInstance = updated || null;
+            }
+          });
+        }
+      });
+    }
   }
 
   ngOnDestroy() {
     this.unsubInstances?.();
+    this.unsubLinkStatus?.();
   }
 
   toggleNewForm(): void {

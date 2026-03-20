@@ -2,56 +2,77 @@
   <header class="header">
     <h1 class="logo">OpenCode Manager</h1>
     <div class="header-actions">
-      <button class="btn-primary" (click)="toggleNewForm()">
-        {{ showNewForm ? 'Cancel' : 'New Instance' }}
-      </button>
+      @if (isLinked) {
+        <button class="btn-primary" (click)="toggleNewForm()">
+          {{ showNewForm ? 'Cancel' : 'New Instance' }}
+        </button>
+      }
       <button class="btn-ghost" (click)="logout()">Logout</button>
     </div>
   </header>
 
-  @if (showNewForm) {
-    <div class="new-instance-form">
-      <div class="form-row">
-        <input
-          type="text"
-          [(ngModel)]="newName"
-          placeholder="Instance name"
+  @if (isLinked === true) {
+    @if (showNewForm) {
+      <div class="new-instance-form">
+        <div class="form-row">
+          <input
+            type="text"
+            [(ngModel)]="newName"
+            placeholder="Instance name"
+          />
+          <input
+            type="text"
+            [(ngModel)]="newDirectory"
+            placeholder="Working directory (e.g. /home/user/project)"
+          />
+          <select [(ngModel)]="newProvider">
+            <option value="claudecode">Claude Code</option>
+            <option value="opencode">OpenCode</option>
+          </select>
+          <button class="btn-success" (click)="createInstance()" [disabled]="!newName.trim() || !newDirectory.trim()">
+            Create
+          </button>
+        </div>
+      </div>
+    }
+
+    <section class="instance-grid">
+      @for (inst of instances; track inst.id) {
+        <app-instance-card
+          [instance]="inst"
+          [selected]="selectedInstance?.id === inst.id"
+          (selectInstance)="onSelect($event)"
+          (startInstance)="onStart($event)"
+          (stopInstance)="onStop($event)"
+          (deleteInstance)="onDelete($event)"
         />
-        <input
-          type="text"
-          [(ngModel)]="newDirectory"
-          placeholder="Working directory (e.g. /home/user/project)"
-        />
-        <select [(ngModel)]="newProvider">
-          <option value="claudecode">Claude Code</option>
-          <option value="opencode">OpenCode</option>
-        </select>
-        <button class="btn-success" (click)="createInstance()" [disabled]="!newName.trim() || !newDirectory.trim()">
-          Create
-        </button>
+      }
+      @if (instances.length === 0) {
+        <div class="empty-grid">
+          <p>No instances yet. Click "New Instance" to create one.</p>
+        </div>
+      }
+    </section>
+
+    <section class="prompt-section">
+      <app-prompt-panel [instance]="selectedInstance" />
+    </section>
+  } @else if (isLinked === false) {
+    <div class="link-account-container" style="text-align: center; padding: 4rem 2rem; color: var(--text-color);">
+      <h2>Link Your Telegram Account</h2>
+      <p style="margin-bottom: 2rem; color: var(--text-color-muted);">To access the dashboard, you must link your web account to your Telegram account.</p>
+      
+      <div class="link-code-box" style="background: var(--bg-card); border: 1px solid var(--border-color); padding: 2rem; border-radius: 8px; display: inline-block;">
+        <h1 style="font-size: 3rem; margin: 0; letter-spacing: 0.2rem; color: var(--accent-color);">{{ linkCode || '...' }}</h1>
+      </div>
+
+      <div style="margin-top: 2rem; text-align: left; display: inline-block;">
+        <ol style="line-height: 1.6; color: var(--text-color-muted);">
+          <li>Open your Telegram bot</li>
+          <li>Send the following command:</li>
+        </ol>
+        <code style="display: block; background: var(--bg-card); padding: 1rem; border-radius: 4px; margin-top: 0.5rem;">/link {{ linkCode || '123456' }}</code>
       </div>
     </div>
   }
-
-  <section class="instance-grid">
-    @for (inst of instances; track inst.id) {
-      <app-instance-card
-        [instance]="inst"
-        [selected]="selectedInstance?.id === inst.id"
-        (selectInstance)="onSelect($event)"
-        (startInstance)="onStart($event)"
-        (stopInstance)="onStop($event)"
-        (deleteInstance)="onDelete($event)"
-      />
-    }
-    @if (instances.length === 0) {
-      <div class="empty-grid">
-        <p>No instances yet. Click "New Instance" to create one.</p>
-      </div>
-    }
-  </section>
-
-  <section class="prompt-section">
-    <app-prompt-panel [instance]="selectedInstance" />
-  </section>
 </div>

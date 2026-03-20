@@ -8,6 +8,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/pufanyi/opencode-manager/internal/config"
+	"github.com/pufanyi/opencode-manager/internal/firebase"
 	"github.com/pufanyi/opencode-manager/internal/process"
 	"github.com/pufanyi/opencode-manager/internal/store"
 )
@@ -79,12 +80,17 @@ func New(cfg *config.TelegramConfig, procMgr *process.Manager, st *store.Store) 
 	b.RegisterHandlerMatchFunc(matchCommand("/session"), authMiddleware(handlers.HandleSession))
 	b.RegisterHandlerMatchFunc(matchCommand("/sessions"), authMiddleware(handlers.HandleSessions))
 	b.RegisterHandlerMatchFunc(matchCommand("/abort"), authMiddleware(handlers.HandleAbort))
+	b.RegisterHandlerMatchFunc(matchCommand("/link"), authMiddleware(handlers.HandleLink))
 
 	return &Bot{
 		bot:      b,
 		handlers: handlers,
 		cfg:      cfg,
 	}, nil
+}
+
+func (b *Bot) SetFirebase(fb *firebase.Client) {
+	b.handlers.firebase = fb
 }
 
 func (b *Bot) Start(ctx context.Context) {
@@ -103,6 +109,7 @@ func (b *Bot) Start(ctx context.Context) {
 			{Command: "stop", Description: "Stop an instance"},
 			{Command: "start_inst", Description: "Start a stopped instance"},
 			{Command: "abort", Description: "Abort running prompt"},
+			{Command: "link", Description: "Link Web Dashboard account"},
 			{Command: "help", Description: "Show help"},
 		},
 	})

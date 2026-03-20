@@ -96,6 +96,25 @@ export class FirebaseService {
     await signOut(this.auth);
   }
 
+  // ── Account Linking ──
+
+  onUserLinkStatus(uid: string, callback: (isLinked: boolean) => void): Unsubscribe {
+    const dbRef = ref(this.db, `users/${uid}/telegram_id`);
+    return onValue(dbRef, (snapshot) => {
+      this.zone.run(() => callback(snapshot.exists() && snapshot.val() !== null));
+    });
+  }
+
+  async generateLinkCode(uid: string): Promise<string> {
+    const code = Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit code
+    const dbRef = ref(this.db, `link_codes/${code}`);
+    await set(dbRef, {
+      uid,
+      expires: Date.now() + 10 * 60 * 1000, // 10 minutes
+    });
+    return code;
+  }
+
   // ── RTDB Listeners ──
 
   onInstances(callback: (instances: Instance[]) => void): Unsubscribe {
