@@ -596,6 +596,13 @@ func runServe() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+	// Cancel context on signal so blocking calls (e.g. WaitForConfig) can exit.
+	go func() {
+		sig := <-sigCh
+		slog.Info("received signal", "signal", sig)
+		cancel()
+	}()
+
 	slog.Info("connecting to Firebase...", "project", creds.Firebase.DatabaseURL)
 
 	fbClient, err := newFirebaseClient(creds)
@@ -633,6 +640,10 @@ func runServe() {
 		slog.Info("open the web frontend and configure Telegram token, allowed users, etc.")
 		settings, err = remoteConfig.WaitForConfig(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				slog.Info("shutting down")
+				os.Exit(0)
+			}
 			slog.Error("waiting for config failed", "error", err)
 			os.Exit(1)
 		}
@@ -678,8 +689,11 @@ func runServe() {
 		os.Exit(1)
 	}
 
+	// Re-register for a second signal to also shut down the application.
+	sigCh2 := make(chan os.Signal, 1)
+	signal.Notify(sigCh2, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		sig := <-sigCh
+		sig := <-sigCh2
 		slog.Info("received signal", "signal", sig)
 		cancel()
 		application.Shutdown()
