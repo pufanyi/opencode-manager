@@ -865,6 +865,25 @@ func (h *Handlers) startPrompt(ctx context.Context, b *bot.Bot, inst *process.In
 	if releaseFunc != nil {
 		sc.OnDone(releaseFunc)
 	}
+
+	// Persist conversation history.
+	promptText := text
+	sc.OnDone(func() {
+		// Save user message.
+		_ = h.store.SaveMessage(sessionID, &store.Message{
+			Role:    "user",
+			Content: promptText,
+		})
+		// Save assistant response.
+		responseText, toolCalls := sc.Result()
+		if responseText != "" || len(toolCalls) > 0 {
+			_ = h.store.SaveMessage(sessionID, &store.Message{
+				Role:      "assistant",
+				Content:   responseText,
+				ToolCalls: toolCalls,
+			})
+		}
+	})
 }
 
 // showMainDirConflict stores a pending prompt and shows the main-dir conflict keyboard.

@@ -181,6 +181,22 @@ func (sc *StreamContext) OnDone(fn func()) {
 	sc.mu.Unlock()
 }
 
+// Result returns the accumulated response text and tool calls.
+// Safe to call from OnDone callbacks (lock is not held).
+func (sc *StreamContext) Result() (text string, tools []store.ToolCall) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	result := make([]store.ToolCall, len(sc.tools))
+	for i, t := range sc.tools {
+		result[i] = store.ToolCall{
+			Name:   t.Name,
+			Status: t.State,
+			Detail: t.Detail,
+		}
+	}
+	return sc.textContent, result
+}
+
 // MarkSuperseded marks this stream as replaced by a newer one. Its OnDone
 // callbacks will be skipped during cleanup.
 func (sc *StreamContext) MarkSuperseded() {

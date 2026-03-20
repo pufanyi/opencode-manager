@@ -206,9 +206,31 @@ func (a *App) handleFirebaseCommand(ctx context.Context, instanceID, commandID s
 		}
 		// Wrap with Firebase streaming.
 		ch = a.procMgr.WrapEventsIfFirebase(p.SessionID, ch)
-		// Consume events (streaming happens via the wrapper).
+		// Consume events, accumulate content, persist on completion.
 		go func() {
-			for range ch {
+			var textContent string
+			var toolCalls []store.ToolCall
+			for evt := range ch {
+				switch evt.Type {
+				case "text":
+					textContent = evt.Text
+				case "tool_use":
+					toolCalls = appendToolCall(toolCalls, evt)
+				}
+			}
+
+			// Save user message.
+			_ = a.store.SaveMessage(p.SessionID, &store.Message{
+				Role:    "user",
+				Content: p.Content,
+			})
+			// Save assistant response.
+			if textContent != "" || len(toolCalls) > 0 {
+				_ = a.store.SaveMessage(p.SessionID, &store.Message{
+					Role:      "assistant",
+					Content:   textContent,
+					ToolCalls: toolCalls,
+				})
 			}
 		}()
 		return map[string]string{"status": "started"}, nil
@@ -238,6 +260,24 @@ func (a *App) handleFirebaseCommand(ctx context.Context, instanceID, commandID s
 	default:
 		return nil, fmt.Errorf("unknown action: %s", cmd.Action)
 	}
+}
+
+// appendToolCall adds or updates a tool call entry from a stream event.
+func appendToolCall(calls []store.ToolCall, evt provider.StreamEvent) []store.ToolCall {
+	for i, tc := range calls {
+		if tc.Name == evt.ToolName && tc.Status == "running" {
+			calls[i].Status = evt.ToolState
+			if evt.ToolDetail != "" {
+				calls[i].Detail = evt.ToolDetail
+			}
+			return calls
+		}
+	}
+	return append(calls, store.ToolCall{
+		Name:   evt.ToolName,
+		Status: evt.ToolState,
+		Detail: evt.ToolDetail,
+	})
 }
 
 func (a *App) Shutdown() {
