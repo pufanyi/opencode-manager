@@ -1,0 +1,32 @@
+{
+  "rules": {
+    "config": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "instances": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "streams": {
+      "$sessionId": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    },
+    "commands": {
+      "$instanceId": {
+        "$commandId": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        }
+      }
+    },
+    "presence": {
+      "$instanceId": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    }
+  }
+}

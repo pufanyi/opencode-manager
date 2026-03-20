@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	urlpkg "net/url"
 	"sync"
 	"time"
 )
@@ -110,12 +111,11 @@ func (a *Auth) refresh() (string, error) {
 
 	url := "https://securetoken.googleapis.com/v1/token?key=" + a.apiKey
 
-	body, _ := json.Marshal(map[string]string{
-		"grant_type":    "refresh_token",
-		"refresh_token": a.refreshToken,
-	})
+	form := urlpkg.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", a.refreshToken)
 
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	resp, err := http.Post(url, "application/x-www-form-urlencoded", bytes.NewBufferString(form.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("firebase token refresh: %w", err)
 	}
@@ -128,6 +128,7 @@ func (a *Auth) refresh() (string, error) {
 	var result struct {
 		IDToken      string `json:"id_token"`
 		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    string `json:"expires_in"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("decoding refresh response: %w", err)

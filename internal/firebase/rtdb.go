@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -30,18 +31,26 @@ func (r *RTDB) url(path string) string {
 	return fmt.Sprintf("%s/%s.json", r.baseURL, strings.TrimPrefix(path, "/"))
 }
 
-// newRequest creates an authenticated request with Bearer token.
+// newRequest creates an authenticated request using the RTDB REST auth query param.
+// Firebase user ID tokens are accepted by RTDB as ?auth=<token>.
 func (r *RTDB) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
 	token, err := r.auth.Token()
 	if err != nil {
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, r.url(path), body)
+	reqURL, err := url.Parse(r.url(path))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	q := reqURL.Query()
+	q.Set("auth", token)
+	reqURL.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, method, reqURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
 	return req, nil
 }
 
@@ -63,11 +72,11 @@ func (r *RTDB) Set(ctx context.Context, path string, data interface{}) error {
 		return fmt.Errorf("RTDB set: %w", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("RTDB set %s: status %d", path, resp.StatusCode)
+		return r.responseError("RTDB set", path, resp)
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 
@@ -89,11 +98,11 @@ func (r *RTDB) Update(ctx context.Context, path string, data map[string]interfac
 		return fmt.Errorf("RTDB update: %w", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("RTDB update %s: status %d", path, resp.StatusCode)
+		return r.responseError("RTDB update", path, resp)
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 
@@ -109,11 +118,11 @@ func (r *RTDB) Delete(ctx context.Context, path string) error {
 		return fmt.Errorf("RTDB delete: %w", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("RTDB delete %s: status %d", path, resp.StatusCode)
+		return r.responseError("RTDB delete", path, resp)
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 
@@ -131,7 +140,7 @@ func (r *RTDB) Get(ctx context.Context, path string, dest interface{}) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("RTDB get %s: status %d", path, resp.StatusCode)
+		return r.responseError("RTDB get", path, resp)
 	}
 
 	return json.NewDecoder(resp.Body).Decode(dest)
@@ -176,7 +185,7 @@ func (r *RTDB) listenOnce(ctx context.Context, path string, events chan<- SSEEve
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("SSE connect failed: status %d", resp.StatusCode)
+		return r.responseError("SSE connect", path, resp)
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -230,4 +239,16 @@ func (r *RTDB) listenOnce(ctx context.Context, path string, events chan<- SSEEve
 		return err
 	}
 	return io.EOF
+}
+
+func (r *RTDB) responseError(op, path string, resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	debug := resp.Header.Get("X-Firebase-Auth-Debug")
+	if debug != "" {
+		return fmt.Errorf("%s %s: status %d: %s (auth-debug: %s)", op, path, resp.StatusCode, strings.TrimSpace(string(body)), debug)
+	}
+	if len(body) > 0 {
+		return fmt.Errorf("%s %s: status %d: %s", op, path, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return fmt.Errorf("%s %s: status %d", op, path, resp.StatusCode)
 }

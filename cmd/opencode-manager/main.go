@@ -27,12 +27,13 @@ import (
 	"github.com/pufanyi/opencode-manager/internal/store"
 )
 
-
 // credentialsFile is the minimal local config — only Firebase connection info.
 type credentialsFile struct {
 	Firebase struct {
 		APIKey       string `yaml:"api_key"`
 		DatabaseURL  string `yaml:"database_url"`
+		AuthDomain   string `yaml:"auth_domain,omitempty"`
+		ProjectID    string `yaml:"project_id,omitempty"`
 		Email        string `yaml:"email,omitempty"`
 		Password     string `yaml:"password,omitempty"`
 		RefreshToken string `yaml:"refresh_token,omitempty"`
@@ -45,6 +46,9 @@ func main() {
 		switch os.Args[1] {
 		case "login":
 			runLogin()
+			return
+		case "relogin":
+			runRelogin()
 			return
 		case "setup":
 			runSetup()
@@ -70,10 +74,30 @@ type loginResult struct {
 	UID          string `json:"uid"`
 }
 
+type firebaseProjectConfig struct {
+	APIKey      string
+	DatabaseURL string
+	AuthDomain  string
+	ProjectID   string
+}
+
 const totalLoginSteps = 4
 
 func runLogin() {
+	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	credPath := fs.String("credentials", "./credentials.yaml", "path to Firebase credentials file")
+	apiKeyFlag := fs.String("api-key", "", "Firebase web API key")
+	databaseURLFlag := fs.String("database-url", "", "Firebase Realtime Database URL")
+	authDomainFlag := fs.String("auth-domain", "", "Firebase auth domain")
+	projectIDFlag := fs.String("project-id", "", "Firebase project ID")
+	_ = fs.Parse(os.Args[2:])
+
 	reader := bufio.NewReader(os.Stdin)
+	projectCfg, err := resolveFirebaseProjectConfig(*credPath, *apiKeyFlag, *databaseURLFlag, *authDomainFlag, *projectIDFlag)
+	if err != nil {
+		printFail("Invalid Firebase project configuration: %v", err)
+		os.Exit(1)
+	}
 
 	fmt.Println()
 	fmt.Println("  \033[1m\033[36m┌──────────────────────────────────────┐\033[0m")
@@ -81,13 +105,8 @@ func runLogin() {
 	fmt.Println("  \033[1m\033[36m└──────────────────────────────────────┘\033[0m")
 	fmt.Println()
 
-	credPath := "./credentials.yaml"
-	if len(os.Args) > 2 {
-		credPath = os.Args[2]
-	}
-
-	if _, err := os.Stat(credPath); err == nil {
-		fmt.Printf("  \033[33m! %s already exists. Overwrite? [y/N]: \033[0m", credPath)
+	if _, err := os.Stat(*credPath); err == nil {
+		fmt.Printf("  \033[33m! %s already exists. Overwrite? [y/N]: \033[0m", *credPath)
 		ans, _ := reader.ReadString('\n')
 		ans = strings.TrimSpace(strings.ToLower(ans))
 		if ans != "y" && ans != "yes" {
@@ -102,17 +121,17 @@ func runLogin() {
 	fmt.Println("  \033[33mA browser window will open. Sign in with Google or email.\033[0m")
 	fmt.Println()
 
-	refreshToken, email := doBrowserLogin()
+	refreshToken, email := doBrowserLogin(projectCfg)
 	printOK("Signed in as %s", email)
 	fmt.Println()
 
 	// Connect to Firebase for subsequent steps.
-	fbAuth := firebase.NewAuth(defaultAPIKey)
+	fbAuth := firebase.NewAuth(projectCfg.APIKey)
 	if err := fbAuth.SignInWithRefreshToken(refreshToken); err != nil {
 		printFail("Token verification failed: %v", err)
 		os.Exit(1)
 	}
-	rtdb := firebase.NewRTDB(defaultDBURL, fbAuth)
+	rtdb := firebase.NewRTDB(projectCfg.DatabaseURL, fbAuth)
 	ctx := context.Background()
 
 	// Check for existing config.
@@ -176,21 +195,23 @@ func runLogin() {
 	content := fmt.Sprintf(`firebase:
   api_key: %q
   database_url: %q
+  auth_domain: %q
+  project_id: %q
   refresh_token: %q
-`, defaultAPIKey, defaultDBURL, refreshToken)
+`, projectCfg.APIKey, projectCfg.DatabaseURL, projectCfg.AuthDomain, projectCfg.ProjectID, refreshToken)
 
-	if err := os.WriteFile(credPath, []byte(content), 0600); err != nil {
-		printFail("Failed to write %s: %v", credPath, err)
+	if err := os.WriteFile(*credPath, []byte(content), 0600); err != nil {
+		printFail("Failed to write %s: %v", *credPath, err)
 		os.Exit(1)
 	}
-	printOK("Credentials saved to %s", credPath)
+	printOK("Credentials saved to %s", *credPath)
 
 	// Push config to Firebase.
 	settings := map[string]string{
-		"telegram.token":          token,
-		"telegram.allowed_users":  users,
+		"telegram.token":            token,
+		"telegram.allowed_users":    users,
 		"process.claudecode_binary": claudePath,
-		"process.opencode_binary":  opencodePath,
+		"process.opencode_binary":   opencodePath,
 	}
 	// Preserve existing settings not covered by this wizard.
 	for k, v := range existing {
@@ -215,7 +236,24 @@ func runLogin() {
 	fmt.Println()
 }
 
-func doBrowserLogin() (refreshToken, email string) {
+func runRelogin() {
+	fs := flag.NewFlagSet("relogin", flag.ExitOnError)
+	credPath := fs.String("credentials", "./credentials.yaml", "path to Firebase credentials file")
+	_ = fs.Parse(os.Args[2:])
+
+	creds, err := readCredentials(*credPath)
+	if err != nil {
+		printFail("Failed to read %s: %v", *credPath, err)
+		os.Exit(1)
+	}
+
+	if _, err := reloginCredentials(*credPath, creds); err != nil {
+		printFail("Re-login failed: %v", err)
+		os.Exit(1)
+	}
+}
+
+func doBrowserLogin(projectCfg firebaseProjectConfig) (refreshToken, email string) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		printFail("Failed to start local server: %v", err)
@@ -228,10 +266,10 @@ func doBrowserLogin() (refreshToken, email string) {
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		page := loginpage.HTML
-		page = strings.ReplaceAll(page, "{{API_KEY}}", defaultAPIKey)
-		page = strings.ReplaceAll(page, "{{AUTH_DOMAIN}}", defaultAuthDom)
-		page = strings.ReplaceAll(page, "{{DATABASE_URL}}", defaultDBURL)
-		page = strings.ReplaceAll(page, "{{PROJECT_ID}}", defaultProjID)
+		page = strings.ReplaceAll(page, "{{API_KEY}}", projectCfg.APIKey)
+		page = strings.ReplaceAll(page, "{{AUTH_DOMAIN}}", projectCfg.AuthDomain)
+		page = strings.ReplaceAll(page, "{{DATABASE_URL}}", projectCfg.DatabaseURL)
+		page = strings.ReplaceAll(page, "{{PROJECT_ID}}", projectCfg.ProjectID)
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, page)
 	})
@@ -267,6 +305,125 @@ func doBrowserLogin() (refreshToken, email string) {
 	_ = server.Close()
 
 	return result.RefreshToken, result.Email
+}
+
+func reloginCredentials(credPath string, creds *credentialsFile) (*credentialsFile, error) {
+	projectCfg, err := projectConfigFromCredentials(creds)
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Println()
+	fmt.Println("  \033[1m\033[36m┌──────────────────────────────────────┐\033[0m")
+	fmt.Println("  \033[1m\033[36m│    Refresh Firebase Credentials      │\033[0m")
+	fmt.Println("  \033[1m\033[36m└──────────────────────────────────────┘\033[0m")
+	fmt.Println()
+	fmt.Println("  \033[33mA browser window will open. Sign in again to refresh the stored token.\033[0m")
+	fmt.Println()
+
+	refreshToken, email := doBrowserLogin(projectCfg)
+	printOK("Signed in as %s", email)
+
+	updated := *creds
+	updated.Firebase.APIKey = projectCfg.APIKey
+	updated.Firebase.DatabaseURL = projectCfg.DatabaseURL
+	updated.Firebase.AuthDomain = projectCfg.AuthDomain
+	updated.Firebase.ProjectID = projectCfg.ProjectID
+	updated.Firebase.RefreshToken = refreshToken
+
+	if err := writeCredentials(credPath, &updated); err != nil {
+		return nil, err
+	}
+
+	printOK("Credentials refreshed in %s", credPath)
+	fmt.Println()
+	return &updated, nil
+}
+
+func resolveFirebaseProjectConfig(credPath, apiKey, databaseURL, authDomain, projectID string) (firebaseProjectConfig, error) {
+	cfg := firebaseProjectConfig{
+		APIKey:      defaultAPIKey,
+		DatabaseURL: defaultDBURL,
+		AuthDomain:  defaultAuthDom,
+		ProjectID:   defaultProjID,
+	}
+
+	if creds, err := readCredentials(credPath); err == nil {
+		if creds.Firebase.APIKey != "" {
+			cfg.APIKey = creds.Firebase.APIKey
+		}
+		if creds.Firebase.DatabaseURL != "" {
+			cfg.DatabaseURL = creds.Firebase.DatabaseURL
+		}
+		if creds.Firebase.AuthDomain != "" {
+			cfg.AuthDomain = creds.Firebase.AuthDomain
+		}
+		if creds.Firebase.ProjectID != "" {
+			cfg.ProjectID = creds.Firebase.ProjectID
+		}
+	}
+
+	if apiKey != "" {
+		cfg.APIKey = apiKey
+	}
+	if databaseURL != "" {
+		cfg.DatabaseURL = databaseURL
+	}
+	if projectID != "" {
+		cfg.ProjectID = projectID
+	}
+	if authDomain != "" {
+		cfg.AuthDomain = authDomain
+	}
+
+	if cfg.ProjectID == "" {
+		cfg.ProjectID = deriveProjectID(cfg.DatabaseURL)
+	}
+	if cfg.AuthDomain == "" && cfg.ProjectID != "" {
+		cfg.AuthDomain = cfg.ProjectID + ".firebaseapp.com"
+	}
+	if cfg.APIKey == "" || cfg.DatabaseURL == "" || cfg.AuthDomain == "" || cfg.ProjectID == "" {
+		return firebaseProjectConfig{}, fmt.Errorf("api_key, database_url, auth_domain, and project_id are required for login")
+	}
+	return cfg, nil
+}
+
+func projectConfigFromCredentials(creds *credentialsFile) (firebaseProjectConfig, error) {
+	cfg := firebaseProjectConfig{
+		APIKey:      creds.Firebase.APIKey,
+		DatabaseURL: creds.Firebase.DatabaseURL,
+		AuthDomain:  creds.Firebase.AuthDomain,
+		ProjectID:   creds.Firebase.ProjectID,
+	}
+	if cfg.ProjectID == "" {
+		cfg.ProjectID = deriveProjectID(cfg.DatabaseURL)
+	}
+	if cfg.AuthDomain == "" && cfg.ProjectID != "" {
+		cfg.AuthDomain = cfg.ProjectID + ".firebaseapp.com"
+	}
+	if cfg.APIKey == "" || cfg.DatabaseURL == "" || cfg.AuthDomain == "" || cfg.ProjectID == "" {
+		return firebaseProjectConfig{}, fmt.Errorf("credentials.yaml must include api_key, database_url, and enough project metadata to derive auth_domain/project_id")
+	}
+	return cfg, nil
+}
+
+func deriveProjectID(databaseURL string) string {
+	dbURL := strings.TrimPrefix(databaseURL, "https://")
+	dbURL = strings.TrimPrefix(dbURL, "http://")
+	host := dbURL
+	if i := strings.Index(host, "/"); i >= 0 {
+		host = host[:i]
+	}
+	switch {
+	case strings.HasSuffix(host, "-default-rtdb.firebaseio.com"):
+		return strings.TrimSuffix(host, "-default-rtdb.firebaseio.com")
+	case strings.HasSuffix(host, ".firebaseio.com"):
+		return strings.TrimSuffix(host, ".firebaseio.com")
+	case strings.HasSuffix(host, ".firebasedatabase.app"):
+		return strings.TrimSuffix(host, ".firebasedatabase.app")
+	default:
+		return ""
+	}
 }
 
 func detectBinary(name, label string) string {
@@ -335,6 +492,17 @@ func readCredentials(path string) (*credentialsFile, error) {
 	return &creds, nil
 }
 
+func writeCredentials(path string, creds *credentialsFile) error {
+	data, err := yaml.Marshal(creds)
+	if err != nil {
+		return fmt.Errorf("marshaling %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
+}
+
 func openStore(dbPath string) (*store.Store, error) {
 	dbDir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
@@ -385,6 +553,8 @@ func runServe() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: opencode-manager [command] [flags]\n\n")
 		fmt.Fprintf(os.Stderr, "Commands:\n")
+		fmt.Fprintf(os.Stderr, "  login    Browser login + interactive cloud setup\n")
+		fmt.Fprintf(os.Stderr, "  relogin  Refresh Firebase browser credentials in credentials.yaml\n")
 		fmt.Fprintf(os.Stderr, "  setup    Interactive setup wizard (legacy, local config)\n")
 		fmt.Fprintf(os.Stderr, "  (none)   Start the manager (default)\n\n")
 		fmt.Fprintf(os.Stderr, "Modes:\n")
@@ -428,13 +598,13 @@ func runServe() {
 
 	slog.Info("connecting to Firebase...", "project", creds.Firebase.DatabaseURL)
 
-	fbClient, err := firebase.NewClient(firebase.Config{
-		APIKey:       creds.Firebase.APIKey,
-		DatabaseURL:  creds.Firebase.DatabaseURL,
-		Email:        creds.Firebase.Email,
-		Password:     creds.Firebase.Password,
-		RefreshToken: creds.Firebase.RefreshToken,
-	})
+	fbClient, err := newFirebaseClient(creds)
+	if err != nil {
+		if nextCreds, recovered := maybeRecoverFirebaseCredentials(*credPath, creds, err); recovered {
+			creds = nextCreds
+			fbClient, err = newFirebaseClient(creds)
+		}
+	}
 	if err != nil {
 		slog.Error("firebase connection failed", "error", err)
 		os.Exit(1)
@@ -443,6 +613,16 @@ func runServe() {
 	// Pull config from Firebase.
 	remoteConfig := firebase.NewRemoteConfig(fbClient.RTDB)
 	settings, err := remoteConfig.Pull(ctx)
+	if err != nil {
+		if nextCreds, recovered := maybeRecoverFirebaseCredentials(*credPath, creds, err); recovered {
+			creds = nextCreds
+			fbClient, err = newFirebaseClient(creds)
+			if err == nil {
+				remoteConfig = firebase.NewRemoteConfig(fbClient.RTDB)
+				settings, err = remoteConfig.Pull(ctx)
+			}
+		}
+	}
 	if err != nil {
 		slog.Error("failed to pull config from Firebase", "error", err)
 		os.Exit(1)
@@ -468,6 +648,7 @@ func runServe() {
 	cfg.Firebase.Enabled = true
 	cfg.Firebase.APIKey = creds.Firebase.APIKey
 	cfg.Firebase.DatabaseURL = creds.Firebase.DatabaseURL
+	cfg.Firebase.RefreshToken = creds.Firebase.RefreshToken
 	cfg.Firebase.Email = creds.Firebase.Email
 	cfg.Firebase.Password = creds.Firebase.Password
 
@@ -513,6 +694,67 @@ func runServe() {
 	}
 
 	st.Close()
+}
+
+func newFirebaseClient(creds *credentialsFile) (*firebase.Client, error) {
+	return firebase.NewClient(firebase.Config{
+		APIKey:       creds.Firebase.APIKey,
+		DatabaseURL:  creds.Firebase.DatabaseURL,
+		Email:        creds.Firebase.Email,
+		Password:     creds.Firebase.Password,
+		RefreshToken: creds.Firebase.RefreshToken,
+	})
+}
+
+func maybeRecoverFirebaseCredentials(credPath string, creds *credentialsFile, cause error) (*credentialsFile, bool) {
+	if !shouldOfferRelogin(creds, cause) {
+		return creds, false
+	}
+
+	cmdName := filepath.Base(os.Args[0])
+	slog.Warn("firebase credentials may need re-login",
+		"error", cause,
+		"hint", fmt.Sprintf("run `%s relogin --credentials %s` to refresh browser credentials", cmdName, credPath))
+
+	if !isInteractiveTerminal() {
+		return creds, false
+	}
+
+	fmt.Fprintf(os.Stderr, "\nFirebase 凭证可能已失效或无权限，是否现在重新登录并更新 %s? [y/N]: ", credPath)
+	reader := bufio.NewReader(os.Stdin)
+	ans, _ := reader.ReadString('\n')
+	ans = strings.TrimSpace(strings.ToLower(ans))
+	if ans != "y" && ans != "yes" {
+		return creds, false
+	}
+
+	updated, err := reloginCredentials(credPath, creds)
+	if err != nil {
+		slog.Error("firebase re-login failed", "error", err)
+		return creds, false
+	}
+
+	slog.Info("firebase credentials refreshed; retrying")
+	return updated, true
+}
+
+func shouldOfferRelogin(creds *credentialsFile, err error) bool {
+	if creds == nil || creds.Firebase.RefreshToken == "" || err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "refresh token invalid") ||
+		strings.Contains(msg, "permission denied") ||
+		strings.Contains(msg, "status 401") ||
+		strings.Contains(msg, "auth_revoked")
+}
+
+func isInteractiveTerminal() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
 }
 
 // runLegacy is the original boot path: config from local SQLite.

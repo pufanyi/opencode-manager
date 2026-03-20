@@ -98,9 +98,13 @@ Edit `credentials.yaml`:
 firebase:
   api_key: "AIzaSy..."                                             # from web app config
   database_url: "https://your-project-default-rtdb.firebaseio.com"  # from web app config
+  auth_domain: "your-project.firebaseapp.com"                       # optional, used by `login`
+  project_id: "your-project"                                        # optional, used by `login`
   email: "go-bot@your-project.local"                                # the Go server user from step 4
   password: "your-password"
 ```
+
+If you use `./bin/opencode-manager login`, it will reuse these Firebase project values from `credentials.yaml`, or you can pass them explicitly with `--api-key`, `--database-url`, `--auth-domain`, and `--project-id`.
 
 ### 4. Add Initial Config to Firebase
 
@@ -126,6 +130,14 @@ The server will:
 2. Connect to Firebase and authenticate
 3. Pull config from Firebase (or wait for it to be set)
 4. Start the Telegram bot, process manager, and Firebase sync
+
+If the stored Firebase browser token expires, refresh it with:
+
+```bash
+./bin/opencode-manager relogin
+```
+
+On an interactive terminal, startup will also offer to re-login automatically when Firebase returns auth-related errors such as `401` or `Permission denied`.
 
 ### 6. Deploy Web Frontend
 
