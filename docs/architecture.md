@@ -241,9 +241,67 @@ Provides git worktree merge-back logic used by `streaming.go` after prompt compl
 - Aborts on merge conflict and reports the error
 - Used as a secondary merge path alongside the provider's own `mergeAndSync`
 
-### Web Dashboard (`internal/web`)
+### Firebase Communication Layer (`internal/firebase`)
 
-Optional Angular-based web UI, embedded in the binary via `go:embed`.
+The primary mechanism for the web frontend to communicate with the Go backend. Both sides are "clients" that make outbound HTTPS connections to Firebase — **no direct connection, no public IP, no open ports**.
+
+**Key design:** Go signs in as a **regular Firebase user** (email/password or refresh token) via the REST API. It does NOT use the Admin SDK or a service account.
+
+```
+Web Frontend (Angular)          Firebase RTDB              Go Backend
+       │                            │                           │
+       │  onValue(/instances) ◄─────┤◄── Set every 2s ─────────┤  sync.go
+       │  onValue(/presence)  ◄─────┤◄── Update every 30s ─────┤  presence.go
+       │  onValue(/streams)   ◄─────┤◄── Update every 300ms ───┤  streamer.go
+       │                            │                           │
+       │── push(/commands) ────────►│                           │
+       │   {action, status:pending} │──► SSE Listen ───────────►┤  commands.go
+       │                            │◄── Update status:done ────┤
+       │  onValue(status change) ◄──┤                           │
+```
+
+**Components:**
+
+| File | Purpose | Mechanism |
+|------|---------|-----------|
+| `auth.go` | Firebase Auth via REST API (email/password or refresh token) | `identitytoolkit.googleapis.com`, `securetoken.googleapis.com` |
+| `rtdb.go` | RTDB REST client: Get, Set, Update, Delete, Listen (SSE) | HTTP `?auth=<idToken>` |
+| `sync.go` | Syncs local instance list to `/instances` | Periodic PUT every 2s |
+| `presence.go` | Heartbeats to `/presence/{instanceId}` | Periodic PATCH every 30s |
+| `streamer.go` | Buffers provider StreamEvents to `/streams/{sessionId}` | Periodic PATCH every 300ms |
+| `commands.go` | Watches `/commands` via SSE, executes & updates status | SSE + PATCH |
+| `config_sync.go` | Pull/push app config from `/config` | GET/PUT + SSE wait |
+| `client.go` | Ties together Auth, RTDB, Streamer, Presence, Commands | Initialization |
+
+**RTDB Data Model (actual implementation):**
+
+```
+/instances/{instanceId}          ← Written by Go (sync.go), read by web
+    id, name, directory, status, provider_type
+
+/presence/{instanceId}           ← Written by Go (presence.go), read by web
+    online: boolean, last_seen: number
+
+/streams/{sessionId}             ← Written by Go (streamer.go), read by web
+    content, status, tool_calls[], error?, updated_at
+
+/commands/{instanceId}/{cmdId}   ← Written by web, read+updated by Go (commands.go)
+    action, payload, status, user_id, created_at, updated_at, result?, error?
+
+/config                          ← Read/written by both (config_sync.go)
+    telegram_token, binary paths, etc.
+
+/link_codes/{code}               ← Optional: for Telegram account linking
+    uid, expires
+
+/users/{uid}/telegram_id         ← Optional: for Telegram account linking
+```
+
+**Note:** The design doc (`web-frontend-design.md`) originally planned Firestore for persistent data (instances, sessions, history). The actual implementation uses **RTDB only** — Firestore is not used.
+
+### Embedded Web Dashboard (`internal/web`)
+
+Fallback local web UI embedded in the binary via `go:embed`. Used when Firebase is not enabled.
 
 **API Endpoints:**
 
@@ -265,7 +323,23 @@ Optional Angular-based web UI, embedded in the binary via `go:embed`.
 
 ## Data Flow
 
-### Prompt Lifecycle
+### Web Prompt Lifecycle (via Firebase)
+
+```
+1.  User types prompt in web UI
+2.  Web writes to RTDB: /commands/{instanceId}/{cmdId}
+    { action: "prompt", payload: { session_id, content }, status: "pending" }
+3.  Go CommandListener (SSE) detects new command
+4.  Go updates status → "ack"
+5.  Go calls Provider.Prompt(sessionID, content) → returns event channel
+6.  Streamer.WrapEvents wraps the channel, buffering events to RTDB:
+    /streams/{sessionId} updated every 300ms with content + tool_calls
+7.  Web frontend onValue(/streams/{sessionId}) fires on each update → re-renders
+8.  On completion: Go updates stream status → "complete", command status → "done"
+9.  Web sees status change, updates UI
+```
+
+### Telegram Prompt Lifecycle
 
 ```
 1.  Telegram message (text or photo) arrives

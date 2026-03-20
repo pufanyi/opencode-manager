@@ -19,6 +19,7 @@ type FirebaseConfig struct {
 	Enabled      bool
 	APIKey       string
 	DatabaseURL  string
+	ProjectID    string // required for Firestore
 	Email        string // Go client email (email/password mode)
 	Password     string // Go client password (email/password mode)
 	RefreshToken string // Go client refresh token (browser login mode)
@@ -122,6 +123,9 @@ func LoadFromSettings(settings map[string]string) *Config {
 	if v, ok := settings["firebase.database_url"]; ok {
 		cfg.Firebase.DatabaseURL = v
 	}
+	if v, ok := settings["firebase.project_id"]; ok {
+		cfg.Firebase.ProjectID = v
+	}
 	if v, ok := settings["firebase.email"]; ok {
 		cfg.Firebase.Email = v
 	}
@@ -149,6 +153,7 @@ func (c *Config) ToSettings() map[string]string {
 		"firebase.enabled":              strconv.FormatBool(c.Firebase.Enabled),
 		"firebase.api_key":              c.Firebase.APIKey,
 		"firebase.database_url":         c.Firebase.DatabaseURL,
+		"firebase.project_id":           c.Firebase.ProjectID,
 		"firebase.email":                c.Firebase.Email,
 		"firebase.password":             c.Firebase.Password,
 	}
@@ -176,6 +181,9 @@ func ApplyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("FIREBASE_DATABASE_URL"); v != "" {
 		cfg.Firebase.DatabaseURL = v
+	}
+	if v := os.Getenv("FIREBASE_PROJECT_ID"); v != "" {
+		cfg.Firebase.ProjectID = v
 	}
 	if v := os.Getenv("FIREBASE_EMAIL"); v != "" {
 		cfg.Firebase.Email = v

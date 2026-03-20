@@ -18,7 +18,7 @@ import (
 
 type App struct {
 	cfg      *config.Config
-	store    *store.Store
+	store    store.Store
 	procMgr  *process.Manager
 	bot      *bot.Bot
 	web      *web.Server
@@ -26,7 +26,7 @@ type App struct {
 	devMode  bool
 }
 
-func New(cfg *config.Config, st *store.Store, devMode bool) (*App, error) {
+func New(cfg *config.Config, st store.Store, devMode bool) (*App, error) {
 	portPool := process.NewPortPool(cfg.Process.PortRange.Start, cfg.Process.PortRange.End)
 	procMgr := process.NewManager(
 		context.Background(),
@@ -60,6 +60,7 @@ func New(cfg *config.Config, st *store.Store, devMode bool) (*App, error) {
 		fbClient, err := firebase.NewClient(firebase.Config{
 			APIKey:       cfg.Firebase.APIKey,
 			DatabaseURL:  cfg.Firebase.DatabaseURL,
+			ProjectID:    cfg.Firebase.ProjectID,
 			Email:        cfg.Firebase.Email,
 			Password:     cfg.Firebase.Password,
 			RefreshToken: cfg.Firebase.RefreshToken,

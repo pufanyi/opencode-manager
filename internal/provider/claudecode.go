@@ -33,7 +33,7 @@ const DefaultMaxWorktrees = 5
 type ClaudeCodeProvider struct {
 	binary       string
 	dir          string
-	store        *store.Store
+	store        store.Store
 	instID       string // instance ID for session tracking
 	maxWorktrees int    // max worktrees per instance (FIFO eviction)
 
@@ -51,7 +51,7 @@ type ClaudeCodeProvider struct {
 	mainDirNotify []chan struct{} // closed when main dir becomes free
 }
 
-func NewClaudeCodeProvider(binary, dir string, st *store.Store, instanceID string) *ClaudeCodeProvider {
+func NewClaudeCodeProvider(binary, dir string, st store.Store, instanceID string) *ClaudeCodeProvider {
 	return &ClaudeCodeProvider{
 		binary:       binary,
 		dir:          dir,

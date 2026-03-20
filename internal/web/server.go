@@ -22,7 +22,7 @@ var distFS embed.FS
 
 type Server struct {
 	procMgr *process.Manager
-	store   *store.Store
+	store   store.Store
 	addr    string
 	server  *http.Server
 
@@ -33,7 +33,7 @@ type Server struct {
 	devProxy *DevProxy
 }
 
-func NewServer(addr string, procMgr *process.Manager, st *store.Store) *Server {
+func NewServer(addr string, procMgr *process.Manager, st store.Store) *Server {
 	s := &Server{
 		procMgr: procMgr,
 		store:   st,

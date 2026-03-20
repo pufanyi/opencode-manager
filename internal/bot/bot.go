@@ -19,7 +19,7 @@ type Bot struct {
 	cfg      *config.TelegramConfig
 }
 
-func New(cfg *config.TelegramConfig, procMgr *process.Manager, st *store.Store) (*Bot, error) {
+func New(cfg *config.TelegramConfig, procMgr *process.Manager, st store.Store) (*Bot, error) {
 	streamMgr := NewStreamManager(cfg.BoardInterval)
 	handlers := NewHandlers(procMgr, st, streamMgr)
 

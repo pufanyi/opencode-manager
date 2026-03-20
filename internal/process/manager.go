@@ -23,7 +23,7 @@ type Manager struct {
 	opencodeBinary   string
 	claudeCodeBinary string
 	portPool         *PortPool
-	store            *store.Store
+	store            store.Store
 	healthInterval   time.Duration
 	maxRestarts      int
 	onCrash          CrashCallback
@@ -33,7 +33,7 @@ type Manager struct {
 	cancel context.CancelFunc
 }
 
-func NewManager(ctx context.Context, opencodeBinary, claudeCodeBinary string, portPool *PortPool, st *store.Store, healthInterval time.Duration, maxRestarts int) *Manager {
+func NewManager(ctx context.Context, opencodeBinary, claudeCodeBinary string, portPool *PortPool, st store.Store, healthInterval time.Duration, maxRestarts int) *Manager {
 	mCtx, cancel := context.WithCancel(ctx)
 	return &Manager{
 		instances:        make(map[string]*Instance),

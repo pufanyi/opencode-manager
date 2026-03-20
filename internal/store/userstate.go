@@ -11,7 +11,7 @@ type UserState struct {
 	ActiveSessionID  string
 }
 
-func (s *Store) GetUserState(userID int64) (*UserState, error) {
+func (s *SQLiteStore) GetUserState(userID int64) (*UserState, error) {
 	state := &UserState{}
 	err := s.db.QueryRow(
 		`SELECT user_id, COALESCE(active_instance_id, ''), COALESCE(active_session_id, '')
@@ -27,7 +27,7 @@ func (s *Store) GetUserState(userID int64) (*UserState, error) {
 	return state, nil
 }
 
-func (s *Store) SetActiveInstance(userID int64, instanceID string) error {
+func (s *SQLiteStore) SetActiveInstance(userID int64, instanceID string) error {
 	_, err := s.db.Exec(
 		`INSERT INTO user_state (user_id, active_instance_id, active_session_id, updated_at)
 		 VALUES (?, ?, '', CURRENT_TIMESTAMP)
@@ -40,7 +40,7 @@ func (s *Store) SetActiveInstance(userID int64, instanceID string) error {
 	return err
 }
 
-func (s *Store) SetActiveSession(userID int64, sessionID string) error {
+func (s *SQLiteStore) SetActiveSession(userID int64, sessionID string) error {
 	_, err := s.db.Exec(
 		`UPDATE user_state SET active_session_id = ?, updated_at = CURRENT_TIMESTAMP
 		 WHERE user_id = ?`,
@@ -49,7 +49,7 @@ func (s *Store) SetActiveSession(userID int64, sessionID string) error {
 	return err
 }
 
-func (s *Store) ClearUserState(userID int64, instanceID string) error {
+func (s *SQLiteStore) ClearUserState(userID int64, instanceID string) error {
 	_, err := s.db.Exec(
 		`UPDATE user_state SET active_instance_id = '', active_session_id = '', updated_at = CURRENT_TIMESTAMP
 		 WHERE user_id = ? AND active_instance_id = ?`,

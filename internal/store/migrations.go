@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-func (s *Store) migrate() error {
+func (s *SQLiteStore) migrate() error {
 	migrations := []string{
 		`CREATE TABLE IF NOT EXISTS instances (
 			id TEXT PRIMARY KEY,

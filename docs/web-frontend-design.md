@@ -1,8 +1,10 @@
-# Web Frontend Design
+# Web Frontend Communication Architecture
 
 ## Overview
 
-Add a web-based dashboard that communicates with the Go server through Firebase, eliminating the need to expose the Go server to the public internet. Both the Go client and the web frontend are "clients" that connect outward to Firebase.
+The web frontend communicates with the Go server entirely through **Firebase Realtime Database (RTDB)**. Both sides are "clients" that make outbound HTTPS connections to Firebase — there is no direct connection between them.
+
+**Key property:** No public IP, no port forwarding, no tunnels. The Go server only makes outbound HTTPS requests to Firebase.
 
 ## Architecture
 
@@ -15,509 +17,291 @@ Add a web-based dashboard that communicates with the Go server through Firebase,
 │ No public IP   │           │  │ (login/register)    │  │           │ No backend     │
 │ No open ports  │           │  ├─────────────────────┤  │           │ Pure SPA       │
 │                │           │  │ Realtime Database   │  │           │                │
-│ Components:    │           │  │ (streaming tokens,  │  │           │ Components:    │
-│ - Process Mgr  │           │  │  commands)          │  │           │ - Login page   │
-│ - TG Bot       │           │  ├─────────────────────┤  │           │ - Dashboard    │
-│ - Firebase SDK │           │  │ Firestore           │  │           │ - Instance mgr │
-│                │           │  │ (persistent data,   │  │           │ - Session view │
-│                │           │  │  history)           │  │           │ - Prompt panel │
-└────────────────┘           │  └─────────────────────┘  │           └────────────────┘
-                             └──────────────────────────┘
+│ Components:    │           │  │ (ALL data:          │  │           │ Components:    │
+│ - Process Mgr  │           │  │  instances, streams │  │           │ - Login page   │
+│ - TG Bot       │           │  │  commands, presence │  │           │ - Dashboard    │
+│ - Firebase REST│           │  │  config)            │  │           │ - Instance mgr │
+│                │           │  └─────────────────────┘  │           │ - Session view │
+│                │           │                           │           │ - Prompt panel │
+└────────────────┘           └──────────────────────────┘           └────────────────┘
 ```
-
-**Key property:** Both sides make only outbound connections. No public IP, no port forwarding, no tunnels.
 
 ## Firebase Services Used
 
-| Service             | Purpose                              | Go SDK                          | Web SDK              |
-|---------------------|--------------------------------------|---------------------------------|----------------------|
-| Auth                | User login/registration              | `firebase.google.com/go/v4`     | `firebase/auth`      |
-| Realtime Database   | High-frequency streaming data        | `firebase.google.com/go/v4`     | `firebase/database`  |
-| Firestore           | Persistent structured data           | `cloud.google.com/go/firestore` | `firebase/firestore`  |
+**Only two services are used in the actual implementation:**
 
-## Data Model
+| Service           | Purpose                        | Go Side                            | Web Side             |
+|-------------------|--------------------------------|------------------------------------|----------------------|
+| Auth              | User login/registration        | REST API (`identitytoolkit.googleapis.com`) | `firebase/auth` JS SDK |
+| Realtime Database | All data exchange              | REST API (`{db}.firebaseio.com`)   | `firebase/database` JS SDK |
 
-### Firebase Realtime Database (RTDB)
+**Note:** The original design planned to use Firestore for persistent data (instances, sessions, history). This was **not implemented** — all data goes through RTDB only. Go authenticates as a regular Firebase user via REST API, not via the Admin SDK or a service account.
 
-Used for ephemeral, high-frequency data. Priced by bandwidth, not operations.
+## Authentication
 
-```
-/streams/{sessionId}
-    content: string           // Accumulated text (updated every ~300ms)
-    status: "streaming" | "idle" | "complete" | "error"
-    tool_calls: [             // Active tool invocations
-        {
-            name: string,
-            status: "running" | "done" | "error",
-            detail: string
-        }
-    ]
-    error: string | null
-    updated_at: number        // Unix ms
-
-/commands/{instanceId}/{commandId}
-    action: "start" | "stop" | "prompt" | "delete" | "create_session"
-    payload: object           // Action-specific data
-    status: "pending" | "ack" | "done" | "error"
-    result: object | null     // Response from Go server
-    user_id: string           // Firebase Auth UID
-    created_at: number
-    updated_at: number
-
-/presence/{instanceId}
-    online: boolean           // Go server heartbeat
-    last_seen: number         // Unix ms
-    version: string           // Go server version
-```
-
-### Firestore
-
-Used for persistent, queryable data. Priced by operations (low frequency).
+Go signs in as a regular Firebase user, not an admin:
 
 ```
-/users/{uid}                          // Firebase Auth UID
-    display_name: string
-    role: "admin" | "user"
-    telegram_user_id: number | null   // Link to Telegram identity
-    created_at: timestamp
-    settings: {
-        theme: "dark" | "light"
-        notifications: boolean
-    }
+Go Server                                Firebase Auth REST API
+    │                                          │
+    ├── POST identitytoolkit.googleapis.com ──►│  (email/password)
+    │   /v1/accounts:signInWithPassword        │
+    │◄──────── idToken + refreshToken ─────────┤
+    │                                          │
+    │  (token used as ?auth=<idToken> on       │
+    │   all RTDB requests)                     │
+    │                                          │
+    ├── POST securetoken.googleapis.com ──────►│  (token refresh)
+    │   /v1/token                              │
+    │◄──────── new idToken ────────────────────┤
+```
 
-/instances/{instanceId}
+Token refresh happens automatically when the token is within 5 minutes of expiry (tokens last ~60 minutes).
+
+Two auth modes are supported:
+- **Email/Password** — for dedicated service accounts
+- **Refresh Token** — from browser-based login (Google, etc.)
+
+## RTDB Data Model
+
+All data lives in RTDB. There is no Firestore.
+
+```
+/instances/{instanceId}              ← Written by Go (sync.go every 2s)
+    id: string                          Read by web (onValue listener)
     name: string
     directory: string
     status: "running" | "stopped" | "starting" | "failed"
     provider_type: "claudecode" | "opencode"
-    owner_id: string                  // Firebase Auth UID
-    port: number
-    auto_start: boolean
-    created_at: timestamp
-    updated_at: timestamp
 
-/sessions/{sessionId}
-    instance_id: string
-    title: string
-    message_count: number
-    worktree_path: string
-    branch: string
-    created_at: timestamp
-    updated_at: timestamp
+/presence/{instanceId}               ← Written by Go (presence.go every 30s)
+    online: boolean                     Read by web (onValue listener)
+    last_seen: number                   // Unix ms
 
-/history/{sessionId}/messages/{messageId}
-    role: "user" | "assistant"
-    content: string                   // Full text of completed response
-    tool_calls: [...]                 // Tool invocations with results
-    created_at: timestamp
+/streams/{sessionId}                 ← Written by Go (streamer.go every 300ms)
+    content: string                     Read by web (onValue listener)
+    status: "streaming" | "complete" | "error"
+    tool_calls: [
+        { name: string, status: string, detail: string }
+    ]
+    error: string | null
+    updated_at: number                  // Unix ms
+
+/commands/{instanceId}/{commandId}   ← Written by web (push + set)
+    action: "start" | "stop" | "delete" | "prompt" | "create_session" | "list_sessions"
+    payload: object
+    status: "pending" | "ack" | "done" | "error"
+    user_id: string                     // Firebase Auth UID
+    created_at: number
+    updated_at: number
+    result: object | null               // Set by Go on success
+    error: string | null                // Set by Go on failure
+
+/config                              ← Read/written by both
+    telegram_token, binary paths, etc.
+    Go can wait for config via SSE (WaitForConfig)
 ```
 
-### Firestore Security Rules
+### Optional: Telegram Account Linking
 
-```javascript
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    // Users can only read/write their own profile
-    match /users/{uid} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
-    }
+Only used when Telegram bot integration is enabled:
 
-    // Instances: owner can read/write, admin can read all
-    match /instances/{instanceId} {
-      allow read: if request.auth != null &&
-        (resource.data.owner_id == request.auth.uid ||
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin');
-      allow create: if request.auth != null;
-      allow update, delete: if request.auth != null &&
-        resource.data.owner_id == request.auth.uid;
-    }
-
-    // Sessions: accessible if user owns the parent instance
-    match /sessions/{sessionId} {
-      allow read, write: if request.auth != null;
-      // Fine-grained check done via instance ownership in application logic
-    }
-
-    // History: read-only from web, written by Go server (admin SDK)
-    match /history/{sessionId}/messages/{messageId} {
-      allow read: if request.auth != null;
-    }
-  }
-}
 ```
+/link_codes/{code}                   ← Written by web, read+deleted by Go
+    uid: string                         6-digit code, 10-minute expiry
+    expires: number
 
-### RTDB Security Rules
-
-```json
-{
-  "rules": {
-    "streams": {
-      "$sessionId": {
-        ".read": "auth != null",
-        ".write": false
-      }
-    },
-    "commands": {
-      "$instanceId": {
-        "$commandId": {
-          ".read": "auth != null",
-          ".write": "auth != null && newData.child('user_id').val() === auth.uid"
-        }
-      }
-    },
-    "presence": {
-      "$instanceId": {
-        ".read": "auth != null",
-        ".write": false
-      }
-    }
-  }
-}
+/users/{uid}/telegram_id             ← Written by Go, read by web
+    number                              Telegram user ID
 ```
-
-Note: Go server uses the Admin SDK which bypasses security rules. Rules only apply to web frontend (client SDK).
 
 ## Data Flow
 
-### 1. Real-time Streaming (Claude Code → Web)
+### 1. Instance Sync (Go → Web)
 
-```
-Claude Code produces tokens
-        │
-        ▼
-Go Server buffers tokens (300ms window)
-        │
-        ▼
-RTDB: /streams/{sessionId}.content = accumulated text
-        │
-        ▼
-Web Frontend: onValue() fires, re-renders content
-```
-
-Go side (pseudocode):
+Go server polls its local process manager every 2 seconds and PUTs the full instance list to `/instances`:
 
 ```go
-func (s *FirebaseStreamer) StreamToFirebase(sessionID string, events <-chan provider.StreamEvent) {
-    ref := s.rtdb.NewRef("streams/" + sessionID)
-    ref.Set(ctx, map[string]interface{}{
-        "content":    "",
-        "status":     "streaming",
-        "tool_calls": []interface{}{},
-        "updated_at": time.Now().UnixMilli(),
-    })
-
-    var mu sync.Mutex
-    var fullContent string
-    var toolCalls []map[string]interface{}
-
-    // Flush buffer every 300ms
-    ticker := time.NewTicker(300 * time.Millisecond)
-    defer ticker.Stop()
-
-    dirty := false
-
-    go func() {
-        for range ticker.C {
-            mu.Lock()
-            if dirty {
-                ref.Update(ctx, map[string]interface{}{
-                    "content":    fullContent,
-                    "tool_calls": toolCalls,
-                    "updated_at": time.Now().UnixMilli(),
-                })
-                dirty = false
-            }
-            mu.Unlock()
-        }
-    }()
-
-    for evt := range events {
-        mu.Lock()
-        switch evt.Type {
-        case "text":
-            fullContent += evt.Content
-            dirty = true
-        case "tool_use":
-            toolCalls = append(toolCalls, map[string]interface{}{
-                "name":   evt.ToolName,
-                "status": evt.ToolStatus,
-                "detail": evt.Content,
-            })
-            dirty = true
-        case "done":
-            ref.Update(ctx, map[string]interface{}{
-                "content":    fullContent,
-                "status":     "complete",
-                "tool_calls": toolCalls,
-                "updated_at": time.Now().UnixMilli(),
-            })
-        case "error":
-            ref.Update(ctx, map[string]interface{}{
-                "status":     "error",
-                "error":      evt.Content,
-                "updated_at": time.Now().UnixMilli(),
-            })
-        }
-        mu.Unlock()
-    }
+// sync.go — syncInstances()
+instances := lister()
+data := make(map[string]interface{}, len(instances))
+for _, inst := range instances {
+    data[inst.ID] = map[string]interface{}{...}
 }
+c.RTDB.Set(ctx, "instances", data)  // PUT — replaces entire /instances
 ```
 
-Web side (pseudocode):
+Web frontend reads with `onValue`:
 
 ```typescript
-import { ref, onValue } from "firebase/database";
-
-function useStream(sessionId: string) {
-    const [content, setContent] = useState("");
-    const [status, setStatus] = useState("idle");
-    const [toolCalls, setToolCalls] = useState([]);
-
-    useEffect(() => {
-        const streamRef = ref(db, `streams/${sessionId}`);
-        const unsub = onValue(streamRef, (snapshot) => {
-            const data = snapshot.val();
-            if (data) {
-                setContent(data.content);
-                setStatus(data.status);
-                setToolCalls(data.tool_calls || []);
-            }
-        });
-        return unsub;
-    }, [sessionId]);
-
-    return { content, status, toolCalls };
-}
+// firebase.service.ts — onInstances()
+const dbRef = ref(this.db, "instances");
+onValue(dbRef, (snapshot) => {
+    const instances = Object.values(snapshot.val() || {});
+    callback(instances);
+});
 ```
 
-### 2. Commands (Web → Go)
+### 2. Presence Heartbeat (Go → Web)
 
-```
-User clicks "Start Instance" in web UI
-        │
-        ▼
-Web writes to RTDB: /commands/{instanceId}/{newId}
-    { action: "start", status: "pending", user_id: uid }
-        │
-        ▼
-Go Server: Firestore Snapshots listens on /commands/{instanceId}
-    Receives new command → executes → updates status to "done"
-        │
-        ▼
-Web: onValue() sees status change → updates UI
+Every 30 seconds, Go PATCHes `/presence/{instanceId}`:
+
+```go
+// presence.go — heartbeat()
+rtdb.Update(ctx, "presence/"+id, map[string]interface{}{
+    "online": true, "last_seen": time.Now().UnixMilli(),
+})
 ```
 
-### 3. Prompt from Web
+On shutdown, marks all instances offline. Web shows green/red status indicators.
+
+### 3. Commands (Web → Go)
+
+Web pushes a new command node; Go listens via SSE:
 
 ```
-User types prompt in web UI
-        │
-        ▼
-Web writes command:
-    /commands/{instanceId}/{cmdId}
-    { action: "prompt", payload: { session_id, content }, status: "pending" }
-        │
-        ▼
-Go receives command
-    → Calls Provider.Prompt(sessionID, content)
-    → Updates command status to "ack"
-    → Streams events to /streams/{sessionId} (flow #1 above)
-    → On completion: updates command status to "done"
-    → Saves to Firestore /history/{sessionId}/messages/
+Web: push(/commands/{instanceId})
+  → { action: "prompt", payload: {session_id, content}, status: "pending" }
+
+Go (SSE on /commands):
+  → Detects new "pending" command
+  → PATCH status → "ack"
+  → Execute handler
+  → PATCH status → "done" (with result) or "error"
+
+Web: onValue sees status change → resolves promise
 ```
 
-### 4. Presence (Go → Web)
+`sendCommandAndWait()` polls via `onValue` with a 30-second timeout.
+
+### 4. Real-time Streaming (Go → Web)
+
+`Streamer.WrapEvents()` wraps a provider event channel, buffering to RTDB:
 
 ```
-Go Server: every 30 seconds
-    → RTDB: /presence/{instanceId} = { online: true, last_seen: now }
+Provider.Prompt() → event channel
+    → Streamer intercepts events
+    → Buffers text + tool_calls in memory
+    → Flushes to /streams/{sessionId} every 300ms (PATCH)
+    → On done/error: final PATCH with terminal status
 
-Go Server: on shutdown
-    → RTDB: /presence/{instanceId} = { online: false, last_seen: now }
-
-Web: onValue(/presence/{instanceId})
-    → Show green/red dot for each instance
-    → If last_seen > 60s ago, treat as offline
+Web: onValue(/streams/{sessionId})
+    → Re-renders content on each update
 ```
 
-## Auth Flow
+### 5. Remote Config (Bidirectional)
 
-### Registration & Login
+Go can boot with only Firebase credentials and pull remaining config (Telegram token, binary paths) from `/config`. If no config exists, `WaitForConfig()` blocks on SSE until the web frontend sets it.
 
-```
-Web Frontend                         Firebase Auth                    Go Server
-    │                                     │                              │
-    │──signInWithEmailAndPassword()──→     │                              │
-    │←──────── ID Token ──────────────    │                              │
-    │                                     │                              │
-    │  (token stored in browser)          │                              │
-    │                                     │                              │
-    │──read Firestore with token────→     │──verify & enforce rules──→   │
-    │                                     │                              │
-    │                                     │    Go uses Admin SDK         │
-    │                                     │    (bypasses rules,          │
-    │                                     │     verifies tokens          │
-    │                                     │     for command auth)        │
-```
+## Go Implementation
 
-### Linking Telegram ↔ Web Account
+### Package: `internal/firebase`
 
-Optional: allow users to link their Telegram identity to their web account.
-
-```
-1. Web user goes to Settings → "Link Telegram"
-2. Web generates a 6-digit code, writes to Firestore:
-   /link_codes/{code} = { uid: "firebase-uid", expires: ... }
-3. User sends /link <code> to Telegram bot
-4. Go server verifies code, writes telegram_user_id to /users/{uid}
-5. Now instances created via Telegram are visible in web dashboard
-```
-
-## Go Server Changes
-
-### New Package: `internal/firebase`
-
-```
-internal/firebase/
-    client.go       // Firebase app initialization
-    sync.go         // Bidirectional sync: local SQLite ↔ Firestore
-    streamer.go     // Stream provider events to RTDB
-    commands.go     // Listen for commands from RTDB, execute locally
-    presence.go     // Heartbeat to RTDB
-```
+| File | Responsibility |
+|------|---------------|
+| `client.go` | Client initialization, ties together all components |
+| `auth.go` | Firebase Auth REST API: SignIn, SignInWithRefreshToken, Token (with auto-refresh) |
+| `rtdb.go` | RTDB REST client: Get, Set, Update, Delete, Listen (SSE with auto-reconnect) |
+| `sync.go` | Periodic instance list sync to `/instances` (every 2s) |
+| `presence.go` | Periodic heartbeat to `/presence` (every 30s), offline marking on shutdown |
+| `streamer.go` | Wraps provider event channels, buffers + flushes to `/streams` (every 300ms) |
+| `commands.go` | SSE listener on `/commands`, dispatches to handler, updates status |
+| `config_sync.go` | Pull/Push/WaitForConfig on `/config` |
 
 ### Sync Strategy
 
-The Go server keeps SQLite as the local source of truth and syncs to Firebase:
+SQLite remains the local source of truth. Firebase is a synced view for the web frontend:
 
 ```
 Local SQLite (source of truth for Go server)
         │
-        │  On change (create/update/delete instance):
+        │  Periodic sync (every 2s):
         ▼
-Firestore /instances/{id}  (synced copy for web frontend)
-```
-
-This avoids rewriting all existing code. The sync layer is additive.
-
-### Config Changes
-
-New settings in the database:
-
-```
-firebase.project_id          = "your-project-id"
-firebase.credentials_path    = "/path/to/serviceAccountKey.json"
-firebase.enabled             = true
-```
-
-Or via environment variables:
-
-```
-FIREBASE_PROJECT_ID=your-project-id
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/serviceAccountKey.json
+RTDB /instances  (read-only copy for web frontend)
 ```
 
 ## Web Frontend
 
 ### Tech Stack
 
-| Layer      | Choice          | Reason                                     |
-|------------|-----------------|---------------------------------------------|
-| Framework  | Angular (keep)  | Already exists, team knows it               |
-| Hosting    | Vercel or Firebase Hosting | Free static hosting          |
-| Auth       | Firebase Auth JS SDK | Official, full-featured               |
-| DB         | Firebase JS SDK | Official, Realtime + Firestore              |
-| Styling    | Existing (keep) | No need to change                           |
+| Layer      | Choice                         | Reason                    |
+|------------|--------------------------------|---------------------------|
+| Framework  | Angular                        | Already exists            |
+| Hosting    | Vercel or Firebase Hosting     | Free static hosting       |
+| Auth       | Firebase Auth JS SDK           | Official, full-featured   |
+| Data       | Firebase RTDB JS SDK           | Real-time listeners       |
+| Styling    | Existing                       | No need to change         |
 
-Alternative: switch to React/Next.js if starting fresh. But Angular works fine.
+### Key Service: `firebase.service.ts`
+
+All Firebase interaction is centralized in `FirebaseService`:
+
+- **Auth**: login, register, loginWithGoogle, logout
+- **Listeners**: onInstances, onPresence, onStream, onCommandResult (all via `onValue`)
+- **Commands**: sendCommand (fire-and-forget), sendCommandAndWait (with 30s timeout)
+- **Optional**: generateLinkCode, onUserLinkStatus (for Telegram linking)
 
 ### Pages
 
 ```
-/login              → Email/password login form
-/register           → Registration form
-/dashboard          → Instance list with status indicators (green/red dot)
+/login              → Email/password + Google login
+/dashboard          → Instance list with online/offline indicators
 /instance/:id       → Instance detail: sessions, controls (start/stop/delete)
 /session/:id        → Real-time streaming view (token-by-token rendering)
-/settings           → User preferences, Telegram link
 ```
 
-### Session Streaming View
+## RTDB Security Rules
 
-The core feature — watching Claude Code work in real-time:
-
+```json
+{
+  "rules": {
+    "instances": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "streams": {
+      "$sessionId": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    },
+    "commands": {
+      "$instanceId": {
+        "$commandId": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        }
+      }
+    },
+    "presence": {
+      "$instanceId": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    },
+    "config": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "link_codes": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "users": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    }
+  }
+}
 ```
-┌─────────────────────────────────────────────────┐
-│ Session: "Fix authentication bug"    [Running]  │
-├─────────────────────────────────────────────────┤
-│                                                 │
-│ ┌─ Tool: Read file src/auth.ts ───────── ✅ ─┐ │
-│ │ (collapsed, click to expand)               │ │
-│ └────────────────────────────────────────────┘ │
-│                                                 │
-│ ┌─ Tool: Edit file src/auth.ts ───────── ⏳ ─┐ │
-│ │ Replacing line 42-48...                    │ │
-│ └────────────────────────────────────────────┘ │
-│                                                 │
-│ I found the issue. The token validation was    │
-│ checking the wrong field. I've updated the     │
-│ auth middleware to use `user.id` instead of     │
-│ `user.email` for the lookup. Let me run the   │
-│ tests to verify...█                            │
-│                                                 │
-├─────────────────────────────────────────────────┤
-│ [Send prompt...]                    [Stop]      │
-└─────────────────────────────────────────────────┘
-```
 
-## Implementation Phases
-
-### Phase 1: Firebase Integration (Go Side)
-
-1. Add Firebase Admin SDK dependency
-2. Implement `internal/firebase/client.go` — initialization
-3. Implement `internal/firebase/sync.go` — SQLite → Firestore sync for instances
-4. Implement `internal/firebase/streamer.go` — stream events to RTDB
-5. Implement `internal/firebase/commands.go` — listen for commands
-6. Implement `internal/firebase/presence.go` — heartbeat
-7. Wire into `internal/app/app.go`
-
-### Phase 2: Web Frontend Auth
-
-1. Add Firebase Auth to Angular app
-2. Login/register pages
-3. Auth guard on routes
-4. Token management
-
-### Phase 3: Dashboard
-
-1. Instance list (read from Firestore, real-time status via RTDB presence)
-2. Instance controls (start/stop/delete via RTDB commands)
-3. Session list per instance
-
-### Phase 4: Real-time Session View
-
-1. Streaming content renderer (read from RTDB /streams/)
-2. Tool call visualization
-3. Prompt input (write command to RTDB)
-4. Abort button
-
-### Phase 5: Polish
-
-1. Telegram ↔ Web account linking
-2. History browser (completed sessions from Firestore)
-3. Settings page
-4. Responsive design for mobile
+Note: Go signs in as a regular user, so security rules apply to both sides equally.
 
 ## Cost Estimate (Personal Use)
 
 | Resource            | Monthly Usage (est.) | Free Tier   | Cost  |
 |---------------------|---------------------|-------------|-------|
 | Firebase Auth       | <10 users           | Unlimited   | $0    |
-| Firestore reads     | ~30k/month          | 1.5M/month  | $0    |
-| Firestore writes    | ~5k/month           | 600k/month  | $0    |
-| Firestore storage   | ~10 MB              | 1 GB        | $0    |
 | RTDB bandwidth      | ~5 GB/month         | 10 GB/month | $0    |
 | RTDB storage        | ~5 MB (ephemeral)   | 1 GB        | $0    |
 | Web hosting         | Static files        | Free (Vercel/Firebase) | $0 |

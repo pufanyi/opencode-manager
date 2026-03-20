@@ -14,19 +14,21 @@ import (
 type Config struct {
 	APIKey       string
 	DatabaseURL  string
+	ProjectID    string // required for Firestore
 	Email        string // optional (email/password mode)
 	Password     string // optional (email/password mode)
 	RefreshToken string // optional (browser login mode)
 }
 
 // Client is the main Firebase client for the Go server.
-// It ties together Auth, RTDB, Streamer, Presence, and CommandListener.
+// It ties together Auth, RTDB, Firestore, Streamer, Presence, and CommandListener.
 type Client struct {
-	Auth     *Auth
-	RTDB     *RTDB
-	Streamer *Streamer
-	Presence *Presence
-	Commands *CommandListener
+	Auth      *Auth
+	RTDB      *RTDB
+	Firestore *Firestore
+	Streamer  *Streamer
+	Presence  *Presence
+	Commands  *CommandListener
 
 	config Config
 }
@@ -54,12 +56,18 @@ func NewClient(cfg Config) (*Client, error) {
 
 	rtdb := NewRTDB(cfg.DatabaseURL, auth)
 
+	var fs *Firestore
+	if cfg.ProjectID != "" {
+		fs = NewFirestore(cfg.ProjectID, auth)
+	}
+
 	return &Client{
-		Auth:     auth,
-		RTDB:     rtdb,
-		Streamer: NewStreamer(rtdb, 300*time.Millisecond),
-		Presence: NewPresence(rtdb, 30*time.Second),
-		config:   cfg,
+		Auth:      auth,
+		RTDB:      rtdb,
+		Firestore: fs,
+		Streamer:  NewStreamer(rtdb, 300*time.Millisecond),
+		Presence:  NewPresence(rtdb, 30*time.Second),
+		config:    cfg,
 	}, nil
 }
 

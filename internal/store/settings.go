@@ -2,7 +2,7 @@ package store
 
 import "fmt"
 
-func (s *Store) GetSetting(key string) (string, bool, error) {
+func (s *SQLiteStore) GetSetting(key string) (string, bool, error) {
 	var value string
 	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&value)
 	if err != nil {
@@ -14,7 +14,7 @@ func (s *Store) GetSetting(key string) (string, bool, error) {
 	return value, true, nil
 }
 
-func (s *Store) SetSetting(key, value string) error {
+func (s *SQLiteStore) SetSetting(key, value string) error {
 	_, err := s.db.Exec(
 		`INSERT INTO settings (key, value) VALUES (?, ?)
 		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -23,12 +23,12 @@ func (s *Store) SetSetting(key, value string) error {
 	return err
 }
 
-func (s *Store) DeleteSetting(key string) error {
+func (s *SQLiteStore) DeleteSetting(key string) error {
 	_, err := s.db.Exec(`DELETE FROM settings WHERE key = ?`, key)
 	return err
 }
 
-func (s *Store) GetAllSettings() (map[string]string, error) {
+func (s *SQLiteStore) GetAllSettings() (map[string]string, error) {
 	rows, err := s.db.Query(`SELECT key, value FROM settings`)
 	if err != nil {
 		return nil, fmt.Errorf("listing settings: %w", err)
@@ -46,7 +46,7 @@ func (s *Store) GetAllSettings() (map[string]string, error) {
 	return settings, rows.Err()
 }
 
-func (s *Store) HasSettings() (bool, error) {
+func (s *SQLiteStore) HasSettings() (bool, error) {
 	var count int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM settings`).Scan(&count)
 	if err != nil {
@@ -55,7 +55,7 @@ func (s *Store) HasSettings() (bool, error) {
 	return count > 0, nil
 }
 
-func (s *Store) SetSettings(settings map[string]string) error {
+func (s *SQLiteStore) SetSettings(settings map[string]string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err

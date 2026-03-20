@@ -37,7 +37,7 @@ type pendingPrompt struct {
 
 type Handlers struct {
 	procMgr   *process.Manager
-	store     *store.Store
+	store     store.Store
 	streamMgr *StreamManager
 	firebase  *firebase.Client
 
@@ -45,7 +45,7 @@ type Handlers struct {
 	pendingPrompts map[int64]*pendingPrompt // userID -> pending
 }
 
-func NewHandlers(procMgr *process.Manager, st *store.Store, streamMgr *StreamManager) *Handlers {
+func NewHandlers(procMgr *process.Manager, st store.Store, streamMgr *StreamManager) *Handlers {
 	return &Handlers{
 		procMgr:        procMgr,
 		store:          st,

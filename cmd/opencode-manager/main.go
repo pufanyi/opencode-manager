@@ -503,7 +503,7 @@ func writeCredentials(path string, creds *credentialsFile) error {
 	return nil
 }
 
-func openStore(dbPath string) (*store.Store, error) {
+func openStore(dbPath string) (*store.SQLiteStore, error) {
 	dbDir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
 		return nil, fmt.Errorf("creating data directory: %w", err)
@@ -662,6 +662,12 @@ func runServe() {
 	cfg.Firebase.RefreshToken = creds.Firebase.RefreshToken
 	cfg.Firebase.Email = creds.Firebase.Email
 	cfg.Firebase.Password = creds.Firebase.Password
+	if cfg.Firebase.ProjectID == "" {
+		cfg.Firebase.ProjectID = creds.Firebase.ProjectID
+		if cfg.Firebase.ProjectID == "" {
+			cfg.Firebase.ProjectID = deriveProjectID(creds.Firebase.DatabaseURL)
+		}
+	}
 
 	if err := config.Validate(cfg); err != nil {
 		slog.Error("config validation failed", "error", err)
@@ -711,9 +717,14 @@ func runServe() {
 }
 
 func newFirebaseClient(creds *credentialsFile) (*firebase.Client, error) {
+	projectID := creds.Firebase.ProjectID
+	if projectID == "" {
+		projectID = deriveProjectID(creds.Firebase.DatabaseURL)
+	}
 	return firebase.NewClient(firebase.Config{
 		APIKey:       creds.Firebase.APIKey,
 		DatabaseURL:  creds.Firebase.DatabaseURL,
+		ProjectID:    projectID,
 		Email:        creds.Firebase.Email,
 		Password:     creds.Firebase.Password,
 		RefreshToken: creds.Firebase.RefreshToken,

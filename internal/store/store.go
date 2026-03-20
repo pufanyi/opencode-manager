@@ -7,11 +7,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type Store struct {
+// SQLiteStore is the local SQLite-backed implementation of Store.
+type SQLiteStore struct {
 	db *sql.DB
 }
 
-func New(dbPath string) (*Store, error) {
+func NewSQLite(dbPath string) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
@@ -21,7 +22,7 @@ func New(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
-	s := &Store{db: db}
+	s := &SQLiteStore{db: db}
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
@@ -29,10 +30,25 @@ func New(dbPath string) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) Close() error {
+// New is an alias for NewSQLite for backward compatibility.
+func New(dbPath string) (*SQLiteStore, error) {
+	return NewSQLite(dbPath)
+}
+
+func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
 
-func (s *Store) DB() *sql.DB {
+func (s *SQLiteStore) DB() *sql.DB {
 	return s.db
+}
+
+// SaveMessage is a no-op for SQLite (history not persisted locally).
+func (s *SQLiteStore) SaveMessage(sessionID string, msg *Message) error {
+	return nil
+}
+
+// ListMessages returns nil for SQLite (history not persisted locally).
+func (s *SQLiteStore) ListMessages(sessionID string) ([]*Message, error) {
+	return nil, nil
 }

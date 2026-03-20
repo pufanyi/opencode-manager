@@ -24,7 +24,7 @@ const (
 const totalSteps = 5
 
 // Run runs the interactive setup wizard, writing config to the given store.
-func Run(st *store.Store) error {
+func Run(st store.Store) error {
 	reader := bufio.NewReader(os.Stdin)
 	stepNum = 0
 

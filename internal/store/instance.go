@@ -21,7 +21,7 @@ type Instance struct {
 
 const instanceCols = `id, name, directory, port, password, status, auto_start, provider_type, created_at, updated_at`
 
-func (s *Store) CreateInstance(inst *Instance) error {
+func (s *SQLiteStore) CreateInstance(inst *Instance) error {
 	if inst.ProviderType == "" {
 		inst.ProviderType = "claudecode"
 	}
@@ -36,19 +36,19 @@ func (s *Store) CreateInstance(inst *Instance) error {
 	return nil
 }
 
-func (s *Store) GetInstance(id string) (*Instance, error) {
+func (s *SQLiteStore) GetInstance(id string) (*Instance, error) {
 	return s.scanInstance(s.db.QueryRow(
 		`SELECT `+instanceCols+` FROM instances WHERE id = ?`, id,
 	))
 }
 
-func (s *Store) GetInstanceByName(name string) (*Instance, error) {
+func (s *SQLiteStore) GetInstanceByName(name string) (*Instance, error) {
 	return s.scanInstance(s.db.QueryRow(
 		`SELECT `+instanceCols+` FROM instances WHERE name = ?`, name,
 	))
 }
 
-func (s *Store) ListInstances() ([]*Instance, error) {
+func (s *SQLiteStore) ListInstances() ([]*Instance, error) {
 	rows, err := s.db.Query(
 		`SELECT ` + instanceCols + ` FROM instances ORDER BY name`,
 	)
@@ -68,7 +68,7 @@ func (s *Store) ListInstances() ([]*Instance, error) {
 	return instances, rows.Err()
 }
 
-func (s *Store) UpdateInstanceStatus(id, status string) error {
+func (s *SQLiteStore) UpdateInstanceStatus(id, status string) error {
 	_, err := s.db.Exec(
 		`UPDATE instances SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		status, id,
@@ -76,7 +76,7 @@ func (s *Store) UpdateInstanceStatus(id, status string) error {
 	return err
 }
 
-func (s *Store) UpdateInstancePort(id string, port int) error {
+func (s *SQLiteStore) UpdateInstancePort(id string, port int) error {
 	_, err := s.db.Exec(
 		`UPDATE instances SET port = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		port, id,
@@ -84,13 +84,13 @@ func (s *Store) UpdateInstancePort(id string, port int) error {
 	return err
 }
 
-func (s *Store) DeleteInstance(id string) error {
+func (s *SQLiteStore) DeleteInstance(id string) error {
 	_, _ = s.db.Exec(`DELETE FROM claude_sessions WHERE instance_id = ?`, id)
 	_, err := s.db.Exec(`DELETE FROM instances WHERE id = ?`, id)
 	return err
 }
 
-func (s *Store) GetRunningInstances() ([]*Instance, error) {
+func (s *SQLiteStore) GetRunningInstances() ([]*Instance, error) {
 	rows, err := s.db.Query(
 		`SELECT ` + instanceCols + ` FROM instances WHERE status = 'running' OR auto_start = 1`,
 	)
@@ -123,7 +123,7 @@ type ClaudeSession struct {
 	Branch       string
 }
 
-func (s *Store) CreateClaudeSession(instanceID, sessionID, title, worktreePath, branch string) error {
+func (s *SQLiteStore) CreateClaudeSession(instanceID, sessionID, title, worktreePath, branch string) error {
 	_, err := s.db.Exec(
 		`INSERT INTO claude_sessions (id, instance_id, title, worktree_path, branch, updated_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
 		sessionID, instanceID, title, worktreePath, branch,
@@ -131,7 +131,7 @@ func (s *Store) CreateClaudeSession(instanceID, sessionID, title, worktreePath, 
 	return err
 }
 
-func (s *Store) GetClaudeSession(sessionID string) (*ClaudeSession, error) {
+func (s *SQLiteStore) GetClaudeSession(sessionID string) (*ClaudeSession, error) {
 	cs := &ClaudeSession{}
 	var createdAt, updatedAt string
 	err := s.db.QueryRow(
@@ -148,7 +148,7 @@ func (s *Store) GetClaudeSession(sessionID string) (*ClaudeSession, error) {
 	return cs, nil
 }
 
-func (s *Store) ListClaudeSessions(instanceID string) ([]ClaudeSession, error) {
+func (s *SQLiteStore) ListClaudeSessions(instanceID string) ([]ClaudeSession, error) {
 	rows, err := s.db.Query(
 		`SELECT id, instance_id, COALESCE(title, ''), COALESCE(created_at, ''), COALESCE(updated_at, created_at, ''), COALESCE(message_count, 0), COALESCE(worktree_path, ''), COALESCE(branch, '')
 		 FROM claude_sessions WHERE instance_id = ? ORDER BY COALESCE(updated_at, created_at) DESC`, instanceID,
@@ -185,7 +185,7 @@ func parseTime(s string) time.Time {
 	return time.Time{}
 }
 
-func (s *Store) UpdateClaudeSessionTitle(sessionID, title string) error {
+func (s *SQLiteStore) UpdateClaudeSessionTitle(sessionID, title string) error {
 	_, err := s.db.Exec(
 		`UPDATE claude_sessions SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		title, sessionID,
@@ -193,7 +193,7 @@ func (s *Store) UpdateClaudeSessionTitle(sessionID, title string) error {
 	return err
 }
 
-func (s *Store) UpdateClaudeSessionActivity(sessionID string) error {
+func (s *SQLiteStore) UpdateClaudeSessionActivity(sessionID string) error {
 	_, err := s.db.Exec(
 		`UPDATE claude_sessions SET message_count = message_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		sessionID,
@@ -201,12 +201,12 @@ func (s *Store) UpdateClaudeSessionActivity(sessionID string) error {
 	return err
 }
 
-func (s *Store) DeleteClaudeSession(sessionID string) error {
+func (s *SQLiteStore) DeleteClaudeSession(sessionID string) error {
 	_, err := s.db.Exec(`DELETE FROM claude_sessions WHERE id = ?`, sessionID)
 	return err
 }
 
-func (s *Store) scanInstance(row *sql.Row) (*Instance, error) {
+func (s *SQLiteStore) scanInstance(row *sql.Row) (*Instance, error) {
 	inst := &Instance{}
 	err := row.Scan(
 		&inst.ID, &inst.Name, &inst.Directory, &inst.Port, &inst.Password,
@@ -225,7 +225,7 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-func (s *Store) scanInstanceRow(row rowScanner) (*Instance, error) {
+func (s *SQLiteStore) scanInstanceRow(row rowScanner) (*Instance, error) {
 	inst := &Instance{}
 	err := row.Scan(
 		&inst.ID, &inst.Name, &inst.Directory, &inst.Port, &inst.Password,

@@ -42,7 +42,7 @@ type boardEntry struct {
 type StreamContext struct {
 	mu               sync.Mutex
 	b                *bot.Bot
-	store            *store.Store
+	store            store.Store
 	chatID           int64
 	sessionID        string
 	instanceName     string
@@ -105,7 +105,7 @@ func NewStreamManager(boardInterval time.Duration) *StreamManager {
 	}
 }
 
-func (sm *StreamManager) StartStream(b *bot.Bot, st *store.Store, chatID int64, sessionID, instanceName, sessionTitle, workDir string, replyToMessageID int, ch <-chan provider.StreamEvent, promptCancel context.CancelFunc, abortFunc func()) *StreamContext {
+func (sm *StreamManager) StartStream(b *bot.Bot, st store.Store, chatID int64, sessionID, instanceName, sessionTitle, workDir string, replyToMessageID int, ch <-chan provider.StreamEvent, promptCancel context.CancelFunc, abortFunc func()) *StreamContext {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	sm.mu.Lock()
