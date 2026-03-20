@@ -20,6 +20,14 @@ import {
   set,
   type Unsubscribe,
 } from "firebase/database";
+import {
+  type Firestore,
+  collection,
+  getDocs,
+  getFirestore,
+  orderBy,
+  query,
+} from "firebase/firestore";
 import { BehaviorSubject, type Observable } from "rxjs";
 import { environment } from "../../environments/environment";
 
@@ -55,11 +63,20 @@ export interface Command {
   error?: string;
 }
 
+export interface HistoryMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  tool_calls: { name: string; status: string; detail: string; input?: string; output?: string }[];
+  created_at: string;
+}
+
 @Injectable({ providedIn: "root" })
 export class FirebaseService {
   private app: FirebaseApp;
   private auth: Auth;
   private db: Database;
+  private firestore: Firestore;
 
   // null = not yet checked, User | false = resolved
   private userSubject = new BehaviorSubject<User | null | false>(null);
@@ -69,6 +86,7 @@ export class FirebaseService {
     this.app = initializeApp(environment.firebase);
     this.auth = getAuth(this.app);
     this.db = getDatabase(this.app);
+    this.firestore = getFirestore(this.app);
 
     onAuthStateChanged(this.auth, (user) => {
       this.zone.run(() => this.userSubject.next(user ?? false));
@@ -201,6 +219,24 @@ export class FirebaseService {
         unsub();
         reject(new Error("Command timeout"));
       }, 30000);
+    });
+  }
+
+  // ── Firestore: Message History ──
+
+  async getSessionHistory(sessionId: string): Promise<HistoryMessage[]> {
+    const messagesRef = collection(this.firestore, "sessions", sessionId, "messages");
+    const q = query(messagesRef, orderBy("created_at", "asc"));
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        id: data["id"] || doc.id,
+        role: data["role"] || "user",
+        content: data["content"] || "",
+        tool_calls: data["tool_calls"] || [],
+        created_at: data["created_at"] || "",
+      } as HistoryMessage;
     });
   }
 }
