@@ -8,13 +8,15 @@ import (
 )
 
 // Config holds Firebase project configuration.
-// APIKey and DatabaseURL are public values (same as web frontend config).
-// Email/Password are the Go service account credentials in Firebase Auth.
+// Supports two auth modes:
+//  1. Email/Password — for dedicated service accounts
+//  2. RefreshToken — from browser-based login (Google, etc.)
 type Config struct {
-	APIKey      string
-	DatabaseURL string
-	Email       string
-	Password    string
+	APIKey       string
+	DatabaseURL  string
+	Email        string // optional (email/password mode)
+	Password     string // optional (email/password mode)
+	RefreshToken string // optional (browser login mode)
 }
 
 // Client is the main Firebase client for the Go server.
@@ -34,13 +36,20 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.APIKey == "" || cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("firebase: APIKey and DatabaseURL are required")
 	}
-	if cfg.Email == "" || cfg.Password == "" {
-		return nil, fmt.Errorf("firebase: Email and Password are required for Go client auth")
-	}
 
 	auth := NewAuth(cfg.APIKey)
-	if err := auth.SignIn(cfg.Email, cfg.Password); err != nil {
-		return nil, fmt.Errorf("firebase: %w", err)
+
+	// Sign in with refresh token (from browser login) or email/password.
+	if cfg.RefreshToken != "" {
+		if err := auth.SignInWithRefreshToken(cfg.RefreshToken); err != nil {
+			return nil, fmt.Errorf("firebase: %w", err)
+		}
+	} else if cfg.Email != "" && cfg.Password != "" {
+		if err := auth.SignIn(cfg.Email, cfg.Password); err != nil {
+			return nil, fmt.Errorf("firebase: %w", err)
+		}
+	} else {
+		return nil, fmt.Errorf("firebase: either RefreshToken or Email+Password required")
 	}
 
 	rtdb := NewRTDB(cfg.DatabaseURL, auth)

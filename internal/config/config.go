@@ -16,11 +16,12 @@ type Config struct {
 }
 
 type FirebaseConfig struct {
-	Enabled     bool
-	APIKey      string
-	DatabaseURL string
-	Email       string // Go client service account email
-	Password    string // Go client service account password
+	Enabled      bool
+	APIKey       string
+	DatabaseURL  string
+	Email        string // Go client email (email/password mode)
+	Password     string // Go client password (email/password mode)
+	RefreshToken string // Go client refresh token (browser login mode)
 }
 
 type WebConfig struct {

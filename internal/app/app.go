@@ -58,10 +58,11 @@ func New(cfg *config.Config, st *store.Store, devMode bool) (*App, error) {
 	// Firebase integration (optional).
 	if cfg.Firebase.Enabled {
 		fbClient, err := firebase.NewClient(firebase.Config{
-			APIKey:      cfg.Firebase.APIKey,
-			DatabaseURL: cfg.Firebase.DatabaseURL,
-			Email:       cfg.Firebase.Email,
-			Password:    cfg.Firebase.Password,
+			APIKey:       cfg.Firebase.APIKey,
+			DatabaseURL:  cfg.Firebase.DatabaseURL,
+			Email:        cfg.Firebase.Email,
+			Password:     cfg.Firebase.Password,
+			RefreshToken: cfg.Firebase.RefreshToken,
 		})
 		if err != nil {
 			slog.Error("firebase initialization failed (continuing without)", "error", err)

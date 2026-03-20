@@ -3,12 +3,17 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -17,19 +22,22 @@ import (
 	"github.com/pufanyi/opencode-manager/internal/app"
 	"github.com/pufanyi/opencode-manager/internal/config"
 	"github.com/pufanyi/opencode-manager/internal/firebase"
+	"github.com/pufanyi/opencode-manager/internal/firebase/loginpage"
 	"github.com/pufanyi/opencode-manager/internal/setup"
 	"github.com/pufanyi/opencode-manager/internal/store"
 )
 
+
 // credentialsFile is the minimal local config — only Firebase connection info.
 type credentialsFile struct {
 	Firebase struct {
-		APIKey      string `yaml:"api_key"`
-		DatabaseURL string `yaml:"database_url"`
-		Email       string `yaml:"email"`
-		Password    string `yaml:"password"`
+		APIKey       string `yaml:"api_key"`
+		DatabaseURL  string `yaml:"database_url"`
+		Email        string `yaml:"email,omitempty"`
+		Password     string `yaml:"password,omitempty"`
+		RefreshToken string `yaml:"refresh_token,omitempty"`
 	} `yaml:"firebase"`
-	DBPath string `yaml:"db_path"` // optional, defaults to ./data/opencode-manager.db
+	DBPath string `yaml:"db_path,omitempty"` // optional, defaults to ./data/opencode-manager.db
 }
 
 func main() {
@@ -47,6 +55,21 @@ func main() {
 	runServe()
 }
 
+// Default Firebase project values (from environment.ts).
+const (
+	defaultAPIKey  = "AIzaSyCECBGZeLmLdi2a8Viii7iIoYksLKlDPPY"
+	defaultDBURL   = "https://opencode-manager-default-rtdb.firebaseio.com"
+	defaultAuthDom = "opencode-manager.firebaseapp.com"
+	defaultProjID  = "opencode-manager"
+)
+
+type loginResult struct {
+	RefreshToken string `json:"refresh_token"`
+	IDToken      string `json:"id_token"`
+	Email        string `json:"email"`
+	UID          string `json:"uid"`
+}
+
 func runLogin() {
 	reader := bufio.NewReader(os.Stdin)
 
@@ -56,15 +79,13 @@ func runLogin() {
 	fmt.Println("  \033[1m\033[36m└──────────────────────────────────────┘\033[0m")
 	fmt.Println()
 
-	// Determine output path.
 	credPath := "./credentials.yaml"
 	if len(os.Args) > 2 {
 		credPath = os.Args[2]
 	}
 
-	// Check if credentials already exist.
 	if _, err := os.Stat(credPath); err == nil {
-		fmt.Printf("  \033[33m⚠ %s already exists. Overwrite? [y/N]: \033[0m", credPath)
+		fmt.Printf("  \033[33m! %s already exists. Overwrite? [y/N]: \033[0m", credPath)
 		ans, _ := reader.ReadString('\n')
 		ans = strings.TrimSpace(strings.ToLower(ans))
 		if ans != "y" && ans != "yes" {
@@ -74,49 +95,84 @@ func runLogin() {
 		fmt.Println()
 	}
 
-	// Default Firebase project values (from environment.ts).
-	const defaultAPIKey = "AIzaSyCECBGZeLmLdi2a8Viii7iIoYksLKlDPPY"
-	const defaultDBURL = "https://opencode-manager-default-rtdb.firebaseio.com"
-
-	// Credentials.
-	fmt.Println("  \033[1mGo Server Account\033[0m")
-	fmt.Println("  \033[33mThe email/password for the Go server user in Firebase Auth.\033[0m")
-	fmt.Println()
-
-	email := promptInput(reader, "  Email: ")
-	password := promptPassword(reader, "  Password: ")
-	fmt.Println()
-
-	apiKey := defaultAPIKey
-	dbURL := defaultDBURL
-
-	// Verify by signing in.
-	fmt.Print("  Verifying credentials... ")
-	auth := firebase.NewAuth(apiKey)
-	if err := auth.SignIn(email, password); err != nil {
-		fmt.Printf("\033[31m✗ %s\033[0m\n", err)
-		fmt.Println()
-		fmt.Println("  \033[33mCheck your API key, database URL, and credentials.\033[0m")
-		fmt.Println("  \033[33mMake sure the user exists in Firebase Console → Authentication → Users.\033[0m")
+	// Start local server for OAuth callback.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fmt.Printf("  \033[31mFailed to start local server: %v\033[0m\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("\033[32m✓ Signed in successfully\033[0m")
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	resultCh := make(chan loginResult, 1)
+	mux := http.NewServeMux()
+
+	// Serve the login page.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		page := loginpage.HTML
+		page = strings.ReplaceAll(page, "{{API_KEY}}", defaultAPIKey)
+		page = strings.ReplaceAll(page, "{{AUTH_DOMAIN}}", defaultAuthDom)
+		page = strings.ReplaceAll(page, "{{DATABASE_URL}}", defaultDBURL)
+		page = strings.ReplaceAll(page, "{{PROJECT_ID}}", defaultProjID)
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, page)
+	})
+
+	// Receive token from browser.
+	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "POST only", 405)
+			return
+		}
+		var result loginResult
+		if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
+			http.Error(w, "invalid body", 400)
+			return
+		}
+		w.WriteHeader(200)
+		fmt.Fprint(w, `{"ok":true}`)
+		resultCh <- result
+	})
+
+	server := &http.Server{Handler: mux}
+	go func() {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			slog.Error("login server error", "error", err)
+		}
+	}()
+
+	url := fmt.Sprintf("http://localhost:%d", port)
+	fmt.Printf("  Opening browser at \033[36m%s\033[0m\n", url)
+	fmt.Println("  \033[33mSign in with Google or email in the browser window.\033[0m")
+	fmt.Println()
+	openBrowser(url)
+
+	// Wait for the callback.
+	fmt.Print("  Waiting for sign-in... ")
+	result := <-resultCh
+	_ = server.Close()
+
+	// Verify the refresh token works.
+	auth := firebase.NewAuth(defaultAPIKey)
+	if err := auth.SignInWithRefreshToken(result.RefreshToken); err != nil {
+		fmt.Printf("\033[31m! %s\033[0m\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("\033[32m! Signed in as %s\033[0m\n", result.Email)
 	fmt.Println()
 
 	// Write credentials file.
 	content := fmt.Sprintf(`firebase:
   api_key: %q
   database_url: %q
-  email: %q
-  password: %q
-`, apiKey, dbURL, email, password)
+  refresh_token: %q
+`, defaultAPIKey, defaultDBURL, result.RefreshToken)
 
 	if err := os.WriteFile(credPath, []byte(content), 0600); err != nil {
-		fmt.Printf("  \033[31m✗ Failed to write %s: %v\033[0m\n", credPath, err)
+		fmt.Printf("  \033[31mFailed to write %s: %v\033[0m\n", credPath, err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("  \033[32m✓ Credentials saved to %s\033[0m\n", credPath)
+	fmt.Printf("  \033[32m! Credentials saved to %s\033[0m\n", credPath)
 	fmt.Println()
 	fmt.Println("  \033[1mNext steps:\033[0m")
 	fmt.Println()
@@ -125,17 +181,17 @@ func runLogin() {
 	fmt.Println()
 }
 
-func promptInput(r *bufio.Reader, msg string) string {
-	fmt.Print(msg)
-	line, _ := r.ReadString('\n')
-	return strings.TrimSpace(line)
-}
-
-func promptPassword(r *bufio.Reader, msg string) string {
-	// Try to disable echo (best effort, falls back to plain input).
-	fmt.Print(msg)
-	line, _ := r.ReadString('\n')
-	return strings.TrimSpace(line)
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	_ = cmd.Start()
 }
 
 func readCredentials(path string) (*credentialsFile, error) {
@@ -244,10 +300,11 @@ func runServe() {
 	slog.Info("connecting to Firebase...", "project", creds.Firebase.DatabaseURL)
 
 	fbClient, err := firebase.NewClient(firebase.Config{
-		APIKey:      creds.Firebase.APIKey,
-		DatabaseURL: creds.Firebase.DatabaseURL,
-		Email:       creds.Firebase.Email,
-		Password:    creds.Firebase.Password,
+		APIKey:       creds.Firebase.APIKey,
+		DatabaseURL:  creds.Firebase.DatabaseURL,
+		Email:        creds.Firebase.Email,
+		Password:     creds.Firebase.Password,
+		RefreshToken: creds.Firebase.RefreshToken,
 	})
 	if err != nil {
 		slog.Error("firebase connection failed", "error", err)

@@ -71,6 +71,21 @@ func (a *Auth) SignIn(email, password string) error {
 	return nil
 }
 
+// SignInWithRefreshToken authenticates using a stored refresh token (from browser login).
+func (a *Auth) SignInWithRefreshToken(rt string) error {
+	a.mu.Lock()
+	a.refreshToken = rt
+	a.expiresAt = time.Time{} // Force immediate refresh
+	a.mu.Unlock()
+
+	// Verify by getting a token.
+	if _, err := a.Token(); err != nil {
+		return fmt.Errorf("firebase refresh token invalid: %w", err)
+	}
+	slog.Info("firebase: signed in with refresh token")
+	return nil
+}
+
 // Token returns a valid ID token, refreshing if needed.
 func (a *Auth) Token() (string, error) {
 	a.mu.RLock()
