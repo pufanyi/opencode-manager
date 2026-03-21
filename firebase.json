@@ -1,4 +1,10 @@
 {
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "database": {
+    "rules": "firebase-rules.json"
+  },
   "hosting": {
     "public": "public",
     "ignore": [
