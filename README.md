@@ -4,8 +4,10 @@ A single-binary tool that manages multiple [Claude Code](https://docs.anthropic.
 
 ## Features
 
-- **Cloud-first config** — Only Firebase credentials stored locally; everything else (Telegram token, instance list, settings) lives in Firebase and syncs automatically
-- **Web dashboard** — Real-time streaming visualization of Claude Code sessions via Firebase; login with email/password, no public IP needed
+- **Cloud-first** — Only Firebase credentials stored locally; config, instances, sessions, and messages all live in Firebase
+- **User-scoped data** — All data under `users/{uid}/` with Firebase security rules enforcing per-user isolation
+- **Multi-client** — Each Go process has a unique `client_id` for instance ownership; run multiple servers safely
+- **Web dashboard** — Real-time streaming visualization via Firebase; login with Google or email, no public IP needed
 - **Dual provider support** — Run both Claude Code (CLI) and OpenCode (HTTP) instances side by side
 - **Telegram interface** — Create, start, stop, switch, and prompt instances from any Telegram client
 - **Active Tasks board** — Live status dashboard in Telegram showing all running tasks with tool progress
@@ -22,102 +24,44 @@ A single-binary tool that manages multiple [Claude Code](https://docs.anthropic.
 - Node.js 22+ and pnpm (for building the web dashboard)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and/or [OpenCode](https://github.com/sst/opencode) in `$PATH`
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- A [Firebase](https://console.firebase.google.com) project (free tier is sufficient)
+- A [Firebase](https://console.firebase.google.com) project with Realtime Database + Firestore enabled
 
 ## Quick Start
 
 ### 1. Build
 
 ```bash
-# Build frontend + Go binary
 make build
-
-# Or just the Go binary (skip frontend build)
-go build -o bin/opencode-manager ./cmd/opencode-manager
 ```
 
 ### 2. Set Up Firebase
 
 1. Go to [Firebase Console](https://console.firebase.google.com) → Create project
-2. Enable **Authentication** → Sign-in method → Email/Password
+2. Enable **Authentication** → Sign-in method → Google (and/or Email/Password)
 3. Enable **Realtime Database** → Create database
-4. In Authentication → Users → **Add user** for the Go server:
-   - Email: `go-bot@your-project.local` (anything works)
-   - Password: choose a password
-5. Add another user for yourself (web dashboard login):
-   - Email: your email
-   - Password: your password
-6. In Realtime Database → **Rules**, paste:
+4. Enable **Cloud Firestore** → Create database
+5. In Project settings → General → Your apps → add a **Web app** → copy the `apiKey` and `databaseURL`
 
-```json
-{
-  "rules": {
-    "config": {
-      ".read": "auth != null",
-      ".write": "auth != null"
-    },
-    "instances": {
-      ".read": "auth != null",
-      ".write": "auth != null"
-    },
-    "streams": {
-      "$sessionId": {
-        ".read": "auth != null",
-        ".write": "auth != null"
-      }
-    },
-    "commands": {
-      "$instanceId": {
-        "$commandId": {
-          ".read": "auth != null",
-          ".write": "auth != null"
-        }
-      }
-    },
-    "presence": {
-      "$instanceId": {
-        ".read": "auth != null",
-        ".write": "auth != null"
-      }
-    }
-  }
-}
-```
-
-7. In Project settings → General → Your apps → add a **Web app** → copy the config values
-
-### 3. Create Credentials File
+### 3. Login & Configure
 
 ```bash
 cp credentials.yaml.example credentials.yaml
+# Fill in api_key and database_url, then:
+./bin/opencode-manager login
 ```
 
-Edit `credentials.yaml`:
+This opens a browser for Firebase sign-in, then prompts for:
+- Telegram bot token
+- Allowed Telegram user IDs
+- Claude Code / OpenCode binary paths
 
-```yaml
-firebase:
-  api_key: "AIzaSy..."                                             # from web app config
-  database_url: "https://your-project-default-rtdb.firebaseio.com"  # from web app config
-  auth_domain: "your-project.firebaseapp.com"                       # optional, used by `login`
-  project_id: "your-project"                                        # optional, used by `login`
-  email: "go-bot@your-project.local"                                # the Go server user from step 4
-  password: "your-password"
+Config is saved to Firestore. A `client_id` is auto-generated in `credentials.yaml`.
+
+### 4. Deploy Security Rules
+
+```bash
+firebase deploy --only firestore:rules,database --project YOUR_PROJECT
 ```
-
-If you use `./bin/opencode-manager login`, it will reuse these Firebase project values from `credentials.yaml`, or you can pass them explicitly with `--api-key`, `--database-url`, `--auth-domain`, and `--project-id`.
-
-### 4. Add Initial Config to Firebase
-
-In Firebase Console → Realtime Database, manually add a `/config` node with these keys:
-
-| Key | Value | Required |
-|-----|-------|----------|
-| `telegram.token` | Your bot token from @BotFather | Yes |
-| `telegram.allowed_users` | Your Telegram user ID (comma-separated for multiple) | Yes |
-| `process.claudecode_binary` | Path to `claude` binary (default: `claude`) | No |
-| `process.opencode_binary` | Path to `opencode` binary (default: `opencode`) | No |
-| `process.port_range_start` | Start of port range for OpenCode (default: `14096`) | No |
-| `process.port_range_end` | End of port range (default: `14196`) | No |
 
 ### 5. Run
 
@@ -126,53 +70,15 @@ In Firebase Console → Realtime Database, manually add a `/config` node with th
 ```
 
 The server will:
-1. Read `credentials.yaml`
-2. Connect to Firebase and authenticate
-3. Pull config from Firebase (or wait for it to be set)
-4. Start the Telegram bot, process manager, and Firebase sync
+1. Read `credentials.yaml` → sign in to Firebase → extract UID from JWT
+2. Pull config from Firestore (auto-migrates from legacy RTDB if needed)
+3. Register this client, restore owned instances
+4. Start Telegram bot, presence heartbeats, command listener, and web dashboard
 
-If the stored Firebase browser token expires, refresh it with:
+If the stored refresh token expires:
 
 ```bash
 ./bin/opencode-manager relogin
-```
-
-On an interactive terminal, startup will also offer to re-login automatically when Firebase returns auth-related errors such as `401` or `Permission denied`.
-
-### 6. Deploy Web Frontend
-
-The web dashboard can be deployed to Firebase Hosting:
-
-```bash
-# Install Firebase CLI
-npm install -g firebase-tools
-
-# Login and initialize
-firebase login
-firebase init hosting
-# → Select your project
-# → Public directory: internal/web/dist/browser
-# → Single-page app: Yes
-
-# Build and deploy
-make web
-firebase deploy --only hosting
-```
-
-Your dashboard will be available at `https://your-project.web.app`. Log in with the web user you created in step 5.
-
-Alternatively, deploy to any static hosting (Vercel, Cloudflare Pages, etc.) by pointing it to the `internal/web/dist/browser` build output.
-
-### Legacy Mode (no Firebase)
-
-If you prefer to use local SQLite config without Firebase:
-
-```bash
-# Interactive setup wizard (stores config in local SQLite)
-./bin/opencode-manager setup
-
-# Run in legacy mode
-./bin/opencode-manager --legacy
 ```
 
 ## Architecture
@@ -180,68 +86,64 @@ If you prefer to use local SQLite config without Firebase:
 ```
 ┌────────────────┐           ┌──────────────────────────┐           ┌────────────────┐
 │   Go Server    │──writes──→│        Firebase           │←─listens─│   Web Frontend │
-│  (your server) │           │                           │           │ (Firebase Host │
-│                │←─listens─│  ┌─────────────────────┐  │──writes──→│  / Vercel /    │
-│ ├ Process Mgr  │           │  │ Auth (email/pass)   │  │           │  any static)   │
-│ ├ TG Bot       │           │  ├─────────────────────┤  │           │                │
-│ ├ Firebase Sync│           │  │ Realtime Database   │  │           │ ├ Login        │
-│ └ Cmd Listener │           │  │ ├ /config           │  │           │ ├ Dashboard    │
-│                │           │  │ ├ /instances        │  │           │ ├ Instance mgr │
-│ No public IP   │           │  │ ├ /streams          │  │           │ └ Session view │
-│ No open ports  │           │  │ ├ /commands         │  │           │                │
-│                │           │  │ └ /presence         │  │           │ No backend     │
-└────────────────┘           │  └─────────────────────┘  │           │ Pure SPA       │
-                             └──────────────────────────┘           └────────────────┘
+│  (your server) │           │                           │           │ (embedded SPA) │
+│                │←─listens─│  ┌─────────────────────┐  │──writes──→│                │
+│ ├ Process Mgr  │           │  │ Auth (Google/email) │  │           │ ├ Login        │
+│ ├ TG Bot       │           │  ├─────────────────────┤  │           │ ├ Dashboard    │
+│ ├ Cmd Listener │           │  │ Firestore (durable) │  │           │ ├ Instance mgr │
+│ └ Presence     │           │  │ └ users/{uid}/...   │  │           │ └ Prompt panel │
+│                │           │  ├─────────────────────┤  │           │                │
+│ No public IP   │           │  │ RTDB (realtime)     │  │           │ No backend     │
+│ No open ports  │           │  │ └ users/{uid}/...   │  │           │ Pure SPA       │
+└────────────────┘           │  └─────────────────────┘  │           └────────────────┘
+                             └──────────────────────────┘
 ```
 
-**Data flows (all through Firebase, no direct connection):**
+**Data storage split:**
 
-| Flow | Path | Direction |
-|------|------|-----------|
-| Instance list | Go syncs every 2s → `/instances` → Web `onValue()` | Go → Web |
-| Streaming tokens | Go buffers 300ms → `/streams/{session}` → Web `onValue()` | Go → Web |
-| Commands | Web `push()` → `/commands/{instance}/{id}` → Go SSE listener | Web → Go |
-| Presence | Go heartbeat 30s → `/presence/{instance}` → Web `onValue()` | Go → Web |
-| Config | Go pulls on startup ← `/config` ← Web/Firebase Console writes | Web → Go |
+| Store | Purpose | Data |
+|-------|---------|------|
+| **Firestore** | Durable records | Instances, sessions, messages, config, client registration |
+| **RTDB** | Real-time ephemeral | Presence, streams, commands, Telegram user state |
+
+**All paths are user-scoped** under `users/{uid}/` — one Firebase project safely serves multiple users.
 
 ### Source Layout
 
 ```
 cmd/opencode-manager/
-└── main.go                  Entry point: cloud-first boot or legacy mode
+└── main.go                  Entry point, login wizard, config migration
 
 internal/
 ├── firebase/
-│   ├── client.go            Firebase client (Auth + RTDB + Streamer + Presence)
-│   ├── auth.go              Email/password auth via REST API (no Admin SDK)
+│   ├── auth.go              Firebase Auth (email/password + refresh token, UID extraction)
+│   ├── client.go            Firebase client (Auth + RTDB + Firestore + Streamer + Presence)
 │   ├── rtdb.go              Realtime Database REST client (CRUD + SSE listener)
+│   ├── firestore.go         Firestore REST client
+│   ├── paths.go             Centralized user-scoped path builders (RTDB + Firestore)
 │   ├── streamer.go          Buffer & flush provider events to RTDB
 │   ├── commands.go          Listen for web frontend commands from RTDB
-│   ├── presence.go          Heartbeat to RTDB (online/offline status)
-│   ├── config_sync.go       Pull/push app config from Firebase
-│   └── sync.go              Periodic instance list sync to RTDB
-├── app/app.go               Application orchestrator + Firebase command handler
-├── config/config.go         Config struct + settings loader + env overrides
-├── store/                   Local SQLite (state cache)
-├── process/                 Instance lifecycle, port pool, crash recovery
+│   ├── presence.go          Two-level heartbeat (client + per-instance)
+│   └── telegram_state.go    Telegram user state + message-session mappings (RTDB)
+├── app/app.go               Application orchestrator, client registration, command handler
+├── config/config.go         Config struct, LoadFromSettings(userConfig, clientConfig)
+├── store/                   Store interface + FirestoreStore (user-scoped)
+├── process/                 Instance lifecycle, port pool, crash recovery, client ownership
 ├── provider/                Provider interface + Claude Code + OpenCode
-├── bot/                     Telegram bot handlers + streaming board
+├── bot/                     Telegram bot handlers, callbacks, streaming board
 ├── gitops/                  Git worktree merge-back
+├── opencode/                OpenCode HTTP client
 └── web/                     Embedded web dashboard (serves Angular build)
 
 web/                         Angular 19 frontend source
-├── src/
-│   ├── environments/        Firebase project config
-│   └── app/
-│       ├── services/
-│       │   └── firebase.service.ts   Firebase Auth + RTDB (replaces old API service)
-│       ├── guards/
-│       │   └── auth.guard.ts         Route guard (redirect to /login if unauthenticated)
-│       └── components/
-│           ├── login/                Email/password login page
-│           ├── dashboard/            Instance grid + controls
-│           ├── instance-card/        Instance status card
-│           └── prompt-panel/         Session selector + real-time streaming view
+└── src/app/
+    ├── services/firebase.service.ts   Firebase Auth + RTDB + Firestore (user-scoped)
+    ├── guards/auth.guard.ts           Route guard
+    └── components/
+        ├── login/                     Google / email login
+        ├── dashboard/                 Instance grid + account linking
+        ├── instance-card/             Instance status card
+        └── prompt-panel/              Session selector + streaming view
 ```
 
 ## CLI Reference
@@ -250,14 +152,13 @@ web/                         Angular 19 frontend source
 Usage: opencode-manager [command] [flags]
 
 Commands:
-  setup    Interactive setup wizard (legacy, local config)
+  login    Browser login + interactive setup (pushes config to Firestore)
+  relogin  Refresh Firebase browser credentials
   (none)   Start the manager (default)
 
 Flags:
-  -credentials string   Path to Firebase credentials file (default "./credentials.yaml")
-  -db string            Path to local database file (optional)
+  -credentials string   Path to credentials file (default "./credentials.yaml")
   -dev                  Enable dev mode with Angular dev server (HMR)
-  -legacy               Use local SQLite config instead of Firebase
 ```
 
 ## Makefile Targets
@@ -266,41 +167,33 @@ Flags:
 make build       # Build frontend + Go binary → bin/opencode-manager
 make web         # Build Angular frontend only
 make dev         # Dev mode: Go with Angular HMR
-make run         # Build and run (cloud mode)
-make run-legacy  # Build and run (legacy SQLite mode)
-make lint        # Lint Go + frontend
+make run         # Build and run
+make lint        # golangci-lint + Biome
 make clean       # Remove build artifacts
 make tidy        # go mod tidy
 ```
 
 ## Telegram Commands
 
-### Instance Management
-
 | Command | Description |
 |---------|-------------|
-| `/new <name> <path>` | Create & start a new Claude Code instance |
-| `/newopencode <name> <path>` | Create & start a new OpenCode instance |
+| `/new <name> <path>` | Create & start a Claude Code instance |
+| `/newopencode <name> <path>` | Create & start an OpenCode instance |
 | `/list` | List all instances with status |
-| `/switch <name>` | Switch your active instance |
+| `/switch <name>` | Switch active instance |
 | `/start_inst <name>` | Start a stopped instance |
 | `/stop [name]` | Stop an instance |
-
-### Session & Prompting
-
-| Command | Description |
-|---------|-------------|
 | `/session new` | Create a new session |
 | `/session` | Show current session info |
-| `/sessions` | List all sessions |
+| `/sessions` | List & manage all sessions |
 | `/abort` | Abort the running prompt |
-| _any text_ | Send as a prompt |
+| `/link <code>` | Link Telegram to web dashboard account |
+| `/help` | Show help |
+| _any text_ | Send as prompt to active instance |
 | _photo_ | Send image for visual analysis |
 | _reply to bot message_ | Continue that session |
 
 ## Environment Variable Overrides
-
-These override values from Firebase config:
 
 | Variable | Overrides |
 |----------|-----------|
@@ -308,7 +201,9 @@ These override values from Firebase config:
 | `TELEGRAM_ALLOWED_USERS` | `telegram.allowed_users` |
 | `OPENCODE_BINARY` | `process.opencode_binary` |
 | `CLAUDECODE_BINARY` | `process.claudecode_binary` |
-| `STORAGE_DATABASE` | Local SQLite path |
+| `FIREBASE_API_KEY` | Firebase API key |
+| `FIREBASE_DATABASE_URL` | Firebase RTDB URL |
+| `FIREBASE_PROJECT_ID` | Firebase project ID |
 
 ## License
 

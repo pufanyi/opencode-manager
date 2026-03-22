@@ -2,387 +2,379 @@
 
 ## Overview
 
-OpenCode Manager is a process supervisor + Telegram bot that bridges mobile users to multiple AI coding sessions. It supports two provider backends: **Claude Code** (CLI-based, default) and **OpenCode** (HTTP-based). An optional web dashboard provides browser-based access.
+OpenCode Manager is a single Go binary (`opencode-manager`) that supervises multiple Claude Code and OpenCode instances. It exposes three interfaces:
+
+- **Telegram bot** -- primary mobile interface for sending prompts and managing instances
+- **Embedded web dashboard** -- local browser UI served from the binary
+- **Firebase web frontend** -- cloud-hosted Angular app that communicates via Firebase
+
+All persistent data lives in Firebase (Firestore for durable records, RTDB for real-time ephemeral state). The Go process is a **client** to Firebase -- it signs in as a regular Firebase user via the REST API and reads/writes data under its own UID. There is no local database, no Admin SDK, and no service account.
 
 ```
-┌─────────────┐     ┌──────────────────────────────────────────────────────┐
-│  Telegram    │     │              OpenCode Manager                        │
-│  User        │◄───►│                                                      │
-│  (mobile)    │     │  ┌─────────┐  ┌─────────────┐  ┌───────────┐       │
-└─────────────┘     │  │   Bot   │  │   Process   │  │   Store   │       │
-                     │  │         │  │   Manager   │  │  (SQLite) │       │
-┌─────────────┐     │  └────┬────┘  └──────┬──────┘  └─────┬─────┘       │
-│  Web        │     │       │              │               │              │
-│  Dashboard  │◄───►│  ┌────┴────┐  ┌──────┴──────┐       │              │
-│  (browser)  │     │  │  Web    │  │  Provider   │       │              │
-└─────────────┘     │  │ Server  │  │ Abstraction │       │              │
-                     │  └─────────┘  └──────┬──────┘       │              │
-                     │                      │               │              │
-                     │           ┌──────────┼───────────┐   │              │
-                     │           │          │           │   │              │
-                     │     ┌─────▼─────┐ ┌──▼────────┐ │   │              │
-                     │     │claude -p  │ │ opencode  │ │   │              │
-                     │     │(per prompt)│ │ serve ×N  │ │   │              │
-                     │     └───────────┘ └───────────┘ │   │              │
-                     │                                  │   │              │
-                     └──────────────────────────────────────────────────────┘
+                        ┌───────────────────────────────────────────────────────┐
+┌─────────────┐         │              opencode-manager (Go binary)             │
+│  Telegram   │◄───────►│                                                       │
+│  (mobile)   │         │  ┌─────────┐  ┌─────────────┐  ┌─────────────────┐  │
+└─────────────┘         │  │   Bot   │  │   Process   │  │ FirestoreStore  │  │
+                        │  │         │  │   Manager   │  │  (via REST API) │  │
+┌─────────────┐         │  └────┬────┘  └──────┬──────┘  └────────┬────────┘  │
+│  Embedded   │◄───────►│  ┌────┴────┐  ┌──────┴──────┐           │           │
+│  Web UI     │         │  │  Web    │  │  Provider   │           │           │
+└─────────────┘         │  │ Server  │  │ Abstraction │           │           │
+                        │  └─────────┘  └──────┬──────┘           │           │
+┌─────────────┐         │                      │                  │           │
+│  Firebase   │         │           ┌──────────┼──────────┐       │           │
+│  Web App    │◄──RTDB──┤           │          │          │       │           │
+│  (Angular)  │         │     ┌─────▼─────┐ ┌──▼───────┐ │       │           │
+└─────────────┘         │     │claude -p  │ │ opencode │ │       │           │
+                        │     │(per prompt)│ │ serve ×N │ │       │           │
+                        │     └───────────┘ └──────────┘ │       │           │
+                        └───────────────────────────────────────────────────────┘
+                                         │                        │
+                                         └────────────────────────┘
+                                            Firebase (Firestore + RTDB)
 ```
 
-## Component Responsibilities
+## Key Design Principles
 
-### App (`internal/app`)
+1. **User-scoped data** -- all data in both RTDB and Firestore lives under `users/{uid}/`. Security rules enforce that each authenticated user can only access their own subtree.
 
-The top-level orchestrator. Wires together all components on startup:
+2. **Client identity** -- each Go process has a unique `clientID` (UUID, persisted in `credentials.yaml`). This enables multi-machine deployments where multiple Go clients share the same Firebase user account. Instances record which client owns them.
 
-1. Opens the SQLite store
-2. Creates the process manager with a port pool
+3. **RTDB for ephemeral real-time data** -- presence heartbeats, streaming content, commands from the web frontend, and Telegram user state. This data is transient and does not need to survive indefinitely.
+
+4. **Firestore for durable records** -- instances, sessions, messages, client registrations, and configuration. This data must persist across restarts and be queryable.
+
+5. **No direct connections** -- the web frontend and Go backend never connect to each other. Both are clients of Firebase. Commands flow through RTDB; durable state flows through Firestore.
+
+## Package Structure
+
+### `cmd/opencode-manager/main.go`
+
+Entry point. Handles three subcommands:
+
+- `(default)` -- read `credentials.yaml`, sign in to Firebase, create FirestoreStore, load config from Firestore (with RTDB migration fallback), validate, start the application
+- `login` -- interactive browser-based setup: sign in via local HTTP server, configure Telegram bot and binary paths, push config to Firestore, write `credentials.yaml`
+- `relogin` -- refresh an expired browser credential without reconfiguring
+
+### `internal/app/`
+
+Top-level orchestrator (`App`). Wires together all components on startup:
+
+1. Creates the process manager with port pool
+2. Creates TelegramState (RTDB-backed)
 3. Initializes the Telegram bot
-4. Restores previously running instances from the database
-5. Pre-registers projects from config
-6. Starts health checks
-7. Starts the web dashboard (if enabled)
-8. Runs the Telegram bot (blocking)
+4. Sets up Firebase streamer and command handler
+5. Registers the client in Firestore
+6. Restores previously running instances
+7. Starts Firebase background services (presence + command listener)
+8. Starts the embedded web dashboard (if enabled)
+9. Runs the Telegram bot (blocking)
 
-### Config (`internal/config`)
+Also dispatches commands from the web frontend: `create`, `start`, `stop`, `delete`, `prompt`, `create_session`, `list_sessions`.
 
-Loads YAML configuration with sensible defaults and environment variable overrides. Validates all required fields before the application starts.
+### `internal/bot/`
 
-### Store (`internal/store`)
+Telegram bot implementation.
 
-Pure-Go SQLite database (no CGo dependency). Four tables:
+| File | Purpose |
+|------|---------|
+| `bot.go` | Bot lifecycle, command routing, auth middleware |
+| `handlers.go` | Command handlers (`/new`, `/start`, `/stop`, etc.) and default prompt handler |
+| `callbacks.go` | Inline keyboard callback handlers (worktree choice, session selection) |
+| `streaming.go` | Active Tasks board -- consolidated live status message with tool progress |
+| `format.go` | Markdown-to-Telegram HTML conversion with tag balancing |
+| `keyboard.go` | Inline keyboard builders |
 
-**`instances`** — Persistent record of all managed instances.
+### `internal/config/`
 
-```sql
-id TEXT PRIMARY KEY              -- UUID
-name TEXT NOT NULL UNIQUE        -- Display name
-directory TEXT NOT NULL          -- Project path
-port INT NOT NULL DEFAULT 0     -- Allocated port (0 for Claude Code)
-password TEXT NOT NULL DEFAULT ''-- Basic Auth password (OpenCode only)
-status TEXT DEFAULT 'stopped'   -- running/stopped/starting/failed
-auto_start BOOLEAN DEFAULT 0
-provider_type TEXT DEFAULT 'claudecode' -- "claudecode" or "opencode"
-created_at, updated_at DATETIME
-```
+Configuration types and loading. No file I/O -- config values come from Firestore maps.
 
-**`user_state`** — Per-Telegram-user active context.
+- `Config`, `TelegramConfig`, `ProcessConfig`, `WebConfig`, `FirebaseConfig` structs
+- `Defaults()` -- sensible defaults
+- `LoadFromSettings(userConfig, clientConfig)` -- builds Config from two `map[string]string` maps
+- `ApplyEnvOverrides(cfg)` -- environment variable overrides
+- `Validate(cfg)` -- checks required fields and value ranges
+- `ToUserSettings()` / `ToClientSettings()` -- serialize back to maps for Firestore storage
 
-```sql
-user_id INTEGER PRIMARY KEY     -- Telegram user ID
-active_instance_id TEXT         -- FK to instances
-active_session_id TEXT          -- Current session ID
-updated_at DATETIME
-```
+### `internal/firebase/`
 
-**`claude_sessions`** — Session tracking (used by both providers).
-
-```sql
-id TEXT PRIMARY KEY             -- Session ID
-instance_id TEXT NOT NULL       -- Parent instance
-title TEXT DEFAULT ''           -- Auto-titled from first prompt
-created_at DATETIME
-updated_at DATETIME
-message_count INTEGER DEFAULT 0 -- Prompt history depth
-worktree_path TEXT DEFAULT ''   -- Git worktree directory (empty = main dir)
-branch TEXT DEFAULT ''          -- Git branch name (empty = no worktree)
-```
-
-**`message_sessions`** — Maps Telegram messages to sessions (enables reply-to-continue).
-
-```sql
-chat_id INTEGER NOT NULL        -- Telegram chat ID
-message_id INTEGER NOT NULL     -- Telegram message ID
-session_id TEXT NOT NULL        -- Session that produced this message
-PRIMARY KEY (chat_id, message_id)
-```
-
-Uses WAL journal mode and 5-second busy timeout for safe concurrent access.
-
-### Provider Abstraction (`internal/provider`)
-
-Defines a common `Provider` interface with two implementations:
-
-**Interface methods:**
-- `Type()` — Return provider backend type
-- `Start(ctx)` — Spawn process
-- `Stop()` — Terminate process
-- `Wait()` — Block until process exits
-- `WaitReady(ctx, timeout)` — Wait for readiness
-- `IsReady()` — Check readiness status
-- `HealthCheck(ctx)` — Ping endpoint
-- `Stderr()` — Return last error output
-- `SetPort(int)` — Update port
-- `CreateSession(ctx, opts)` — New session (opts controls worktree creation)
-- `GetSession(ctx, id)` — Fetch session
-- `ListSessions(ctx)` — List all sessions
-- `SupportsWorktree()` — Whether this provider can create git worktrees
-- `Prompt(ctx, sessionID, content)` — Send prompt, return event channel
-- `Abort(ctx, sessionID)` — Cancel running prompt
-
-**StreamEvent types:** `text`, `tool_use`, `done`, `error`, `merge_failed`
-
-**Claude Code Provider** (`claudecode.go`):
-- No persistent server process
-- Spawns `claude -p` per prompt with `--output-format stream-json`
-- Uses `--resume <sessionID>` for existing sessions
-- Reads JSON-streaming output, emits `StreamEvent`s
-- Session tracking via SQLite `claude_sessions` table
-- No port allocation needed; `WaitReady` returns immediately
-- **Git worktree support**: creates isolated worktrees per session (`SupportsWorktree()` returns true for git repos)
-- **Auto-merge**: after prompt completion, merges session branch back to main and rebases other active worktrees
-- **DeleteSession**: removes worktree directory and branch
-
-**OpenCode Provider** (`opencode.go`):
-- Persistent `opencode serve` child process per instance
-- HTTP REST API + SSE for communication
-- Basic Auth with random 32-hex password
-- Config injected via `OPENCODE_CONFIG_CONTENT` env var
-- Port allocated from configurable range
-- No worktree support (`SupportsWorktree()` returns false)
-
-### Process Manager (`internal/process`)
-
-Manages the lifecycle of all provider instances.
-
-**Port Pool** — Thread-safe allocator over a configurable range. Ports are allocated on start, released on stop, and re-allocated on restart. Only used by OpenCode instances.
-
-**Instance** — Wraps a `Provider` with metadata (name, directory, status, provider type).
-
-**Crash Recovery** — A goroutine monitors each running instance. On unexpected exit:
-
-```
-Crash detected
-  → Mark status = failed
-  → If restarts < max (default 3):
-      → Wait 2^restartCount seconds (exponential backoff)
-      → Allocate new port (OpenCode only)
-      → Restart provider
-      → Continue monitoring
-  → Else:
-      → Notify all Telegram users
-      → Release port
-```
-
-**Health Checks** — Periodic pings to each running instance. Failures are logged but don't trigger restarts (crash recovery handles actual process death).
-
-### OpenCode Client (`internal/opencode`)
-
-HTTP client for the OpenCode REST API:
-
-| Method | Endpoint | Purpose |
-|--------|----------|---------|
-| `GET` | `/` | Health check / status |
-| `GET` | `/session` | List sessions |
-| `POST` | `/session` | Create session |
-| `GET` | `/session/:id` | Get session details |
-| `GET` | `/session/:id/message` | List messages |
-| `POST` | `/session/:id/prompt` | Send prompt (async) |
-| `POST` | `/session/:id/abort` | Abort running prompt |
-
-All requests use HTTP Basic Auth (empty username, instance password).
-
-**SSE Subscriber** — Connects to `GET /event` for real-time streaming. Features:
-- Auto-reconnect with 2-second retry on disconnect
-- 15-second heartbeat timeout (treats silence as disconnect)
-- 1 MB scanner buffer for large messages
-- Event handler registry with wildcard support
-
-### Telegram Bot (`internal/bot`)
-
-**Auth Middleware** — Every handler checks the user ID against the allowed list. Unauthorized users are silently ignored.
-
-**Command Routing** — Commands are matched by prefix (e.g., `/new` matches `/new`, `/new test`, `/new@bot_name`). Unrecognized messages fall through to the default handler, which forwards them as prompts. Photos are routed to the photo handler.
-
-**Worktree Choice** — When a Claude Code instance is in a git repo, new sessions and prompts show an inline keyboard asking "🌿 New Worktree" or "📂 Main Directory". The choice is stored as a pending prompt until the user picks.
-
-**Reply-to-Continue** — When a user replies to a bot response, the handler looks up the session that produced that message (via `message_sessions` table) and continues it, bypassing the worktree choice flow.
-
-**Active Tasks Board** (`streaming.go`) — A consolidated live status message at the bottom of each chat:
-
-```
-User sends text/photo
-  → For git repos: show worktree choice keyboard, wait for selection
-  → Create session (with or without worktree)
-  → Provider.Prompt fires, returns event channel
-  → StreamContext buffers content + tool statuses
-  → Active Tasks board refreshes on a timer (default 2s):
-      - Shows all running tasks as blockquote cards
-      - Displays tool invocations with ⏳/✅/❌ icons and details
-      - "Stop #N" buttons to cancel individual tasks
-      - Repositions to bottom when new messages appear
-  → On completion:
-      - Final response sent as reply to user's original message
-      - Markdown → Telegram HTML conversion with tag balancing
-      - If content > 4096 chars: split into continuation messages
-      - If content > 12000 chars: send as .md file
-      - Auto-merge worktree branch back to main (if applicable)
-      - Board removes completed task (disappears when all tasks done)
-```
-
-**Rate Limiting:**
-- Global: 25-permit semaphore (Telegram limit ≈ 30 msgs/sec, with margin)
-
-**Merge Notifications** — After a prompt completes in a worktree session:
-- Success: "✅ merged N commit(s) from branch into main"
-- Failure: "⚠️ Auto-merge failed" with a "🔧 Fix with Claude" button that creates a new session to resolve the conflict
-
-**Message Formatting** (`format.go`) — Converts Markdown to Telegram-compatible HTML using goldmark. Handles:
-- Heading/list/table/checkbox conversion to Telegram-safe equivalents
-- HTML tag balancing (close unclosed tags, fix nesting violations)
-- HTML-aware truncation (doesn't break tags or entities)
-- UTF-8 safe truncation
-
-### Git Operations (`internal/gitops`)
-
-Provides git worktree merge-back logic used by `streaming.go` after prompt completion:
-
-- Detects main/master branch names
-- Handles both linked worktrees (merge from main worktree) and regular repos (fast-forward ref update)
-- Aborts on merge conflict and reports the error
-- Used as a secondary merge path alongside the provider's own `mergeAndSync`
-
-### Firebase Communication Layer (`internal/firebase`)
-
-The primary mechanism for the web frontend to communicate with the Go backend. Both sides are "clients" that make outbound HTTPS connections to Firebase — **no direct connection, no public IP, no open ports**.
-
-**Key design:** Go signs in as a **regular Firebase user** (email/password or refresh token) via the REST API. It does NOT use the Admin SDK or a service account.
-
-```
-Web Frontend (Angular)          Firebase RTDB              Go Backend
-       │                            │                           │
-       │  onValue(/instances) ◄─────┤◄── Set every 2s ─────────┤  sync.go
-       │  onValue(/presence)  ◄─────┤◄── Update every 30s ─────┤  presence.go
-       │  onValue(/streams)   ◄─────┤◄── Update every 300ms ───┤  streamer.go
-       │                            │                           │
-       │── push(/commands) ────────►│                           │
-       │   {action, status:pending} │──► SSE Listen ───────────►┤  commands.go
-       │                            │◄── Update status:done ────┤
-       │  onValue(status change) ◄──┤                           │
-```
-
-**Components:**
+Firebase REST API client layer. The Go process signs in as a regular Firebase user (not Admin SDK).
 
 | File | Purpose | Mechanism |
 |------|---------|-----------|
-| `auth.go` | Firebase Auth via REST API (email/password or refresh token) | `identitytoolkit.googleapis.com`, `securetoken.googleapis.com` |
-| `rtdb.go` | RTDB REST client: Get, Set, Update, Delete, Listen (SSE) | HTTP `?auth=<idToken>` |
-| `sync.go` | Syncs local instance list to `/instances` | Periodic PUT every 2s |
-| `presence.go` | Heartbeats to `/presence/{instanceId}` | Periodic PATCH every 30s |
-| `streamer.go` | Buffers provider StreamEvents to `/streams/{sessionId}` | Periodic PATCH every 300ms |
-| `commands.go` | Watches `/commands` via SSE, executes & updates status | SSE + PATCH |
-| `config_sync.go` | Pull/push app config from `/config` | GET/PUT + SSE wait |
-| `client.go` | Ties together Auth, RTDB, Streamer, Presence, Commands | Initialization |
+| `auth.go` | Firebase Auth (email/password or refresh token) | `identitytoolkit.googleapis.com`, `securetoken.googleapis.com` |
+| `rtdb.go` | RTDB REST client: Get, Set, Update, Delete, Listen (SSE) | HTTPS with `?auth=<idToken>` |
+| `firestore.go` | Firestore REST client: GetDoc, SetDoc, UpdateDoc, DeleteDoc, ListDocs | Firestore REST API |
+| `client.go` | Ties together Auth, RTDB, Firestore, Streamer, Presence, Commands | Initialization + `StartBackground()` |
+| `paths.go` | Path builder functions for all RTDB and Firestore locations | Pure functions |
+| `presence.go` | Two-level heartbeats (client + per-instance) to RTDB | Periodic PATCH every 30s |
+| `streamer.go` | Buffers provider StreamEvents and flushes to RTDB | Periodic PATCH every 300ms |
+| `commands.go` | Watches RTDB for commands from web frontend, dispatches and updates status | SSE listener + PATCH |
+| `telegram_state.go` | Telegram user state and message-session mappings in RTDB | Get/Set/Update |
 
-**RTDB Data Model (actual implementation):**
+### `internal/process/`
 
-```
-/instances/{instanceId}          ← Written by Go (sync.go), read by web
-    id, name, directory, status, provider_type
+Instance lifecycle management.
 
-/presence/{instanceId}           ← Written by Go (presence.go), read by web
-    online: boolean, last_seen: number
+| File | Purpose |
+|------|---------|
+| `manager.go` | Creates, starts, stops, deletes instances. Crash recovery with exponential backoff. Health checks. |
+| `instance.go` | Wraps a `Provider` with metadata (name, directory, status, provider type, client ID) |
+| `portpool.go` | Thread-safe port allocator over a configurable range |
 
-/streams/{sessionId}             ← Written by Go (streamer.go), read by web
-    content, status, tool_calls[], error?, updated_at
+### `internal/provider/`
 
-/commands/{instanceId}/{cmdId}   ← Written by web, read+updated by Go (commands.go)
-    action, payload, status, user_id, created_at, updated_at, result?, error?
+Provider abstraction with two implementations.
 
-/config                          ← Read/written by both (config_sync.go)
-    telegram_token, binary paths, etc.
+| File | Purpose |
+|------|---------|
+| `provider.go` | `Provider` interface, `StreamEvent` type, `Type` constants (`claudecode`, `opencode`) |
+| `claudecode.go` | Claude Code provider -- spawns `claude -p` per prompt with `--output-format stream-json` |
+| `opencode.go` | OpenCode provider -- manages persistent `opencode serve` child process, HTTP REST + SSE |
 
-/link_codes/{code}               ← Optional: for Telegram account linking
-    uid, expires
+### `internal/store/`
 
-/users/{uid}/telegram_id         ← Optional: for Telegram account linking
-```
+Persistence layer.
 
-**Note:** The design doc (`web-frontend-design.md`) originally planned Firestore for persistent data (instances, sessions, history). The actual implementation uses **RTDB only** — Firestore is not used.
+| File | Purpose |
+|------|---------|
+| `iface.go` | `Store` interface + domain types (`Instance`, `ClaudeSession`, `ClientInfo`, `Message`, `ToolCall`) |
+| `firestore_store.go` | `FirestoreStore` -- Firestore-backed implementation of `Store`, scoped to `users/{uid}/` |
+| `firestore_adapter.go` | `FirestoreAdapter` -- closure-based bridge from `firebase.Firestore` to `store.FirestoreClient` (avoids import cycles) |
 
-### Embedded Web Dashboard (`internal/web`)
+### `internal/web/`
 
-Fallback local web UI embedded in the binary via `go:embed`. Used when Firebase is not enabled.
+Embedded web dashboard.
 
-**API Endpoints:**
+| File | Purpose |
+|------|---------|
+| `server.go` | HTTP server with REST API endpoints + SSE streaming hub. Serves embedded Angular build via `go:embed`. |
+| `devproxy.go` | Reverse proxy to Angular dev server for HMR during development |
 
-| Method | Endpoint | Purpose |
-|--------|----------|---------|
-| `GET` | `/api/instances` | List all instances |
-| `POST` | `/api/instances` | Create instance |
-| `GET` | `/api/instances/:id` | Instance details |
-| `POST` | `/api/instances/:id/start` | Start instance |
-| `POST` | `/api/instances/:id/stop` | Stop instance |
-| `DELETE/POST` | `/api/instances/:id/delete` | Delete instance |
-| `GET` | `/api/instances/:id/sessions` | List sessions |
-| `POST` | `/api/sessions/:id/new` | Create session |
-| `POST` | `/api/prompt` | Send prompt |
-| `POST` | `/api/abort` | Abort prompt |
-| `GET` | `/api/ws` | SSE stream (real-time events) |
+### `internal/gitops/`
 
-**Streaming Hub** — Broadcasts provider events to connected SSE clients. Clients can filter by session ID via `?session=<id>` query parameter.
+| File | Purpose |
+|------|---------|
+| `merge.go` | Git worktree merge-back logic -- merges session branch to main after prompt completion |
 
-## Data Flow
+### `internal/opencode/`
 
-### Web Prompt Lifecycle (via Firebase)
+HTTP client for the OpenCode REST API.
 
-```
-1.  User types prompt in web UI
-2.  Web writes to RTDB: /commands/{instanceId}/{cmdId}
-    { action: "prompt", payload: { session_id, content }, status: "pending" }
-3.  Go CommandListener (SSE) detects new command
-4.  Go updates status → "ack"
-5.  Go calls Provider.Prompt(sessionID, content) → returns event channel
-6.  Streamer.WrapEvents wraps the channel, buffering events to RTDB:
-    /streams/{sessionId} updated every 300ms with content + tool_calls
-7.  Web frontend onValue(/streams/{sessionId}) fires on each update → re-renders
-8.  On completion: Go updates stream status → "complete", command status → "done"
-9.  Web sees status change, updates UI
-```
+| File | Purpose |
+|------|---------|
+| `client.go` | REST client for OpenCode endpoints (sessions, prompts, health) |
+| `sse.go` | SSE subscriber with auto-reconnect and heartbeat timeout |
+| `types.go` | OpenCode API types |
 
-### Telegram Prompt Lifecycle
+## Data Model
+
+### Firestore (durable records)
+
+All paths are under `users/{uid}/`.
 
 ```
-1.  Telegram message (text or photo) arrives
-2.  Auth check (allowed_users)
-3.  If reply to a bot message → look up session from message_sessions table
-4.  Otherwise: look up user_state → active_instance_id
-5.  For photos: download image to temp file, include path in prompt
-6.  If new session needed and provider supports worktree:
-    → Show "🌿 New Worktree" / "📂 Main Directory" choice keyboard
-    → Store pending prompt until user selects
-7.  Create session (with or without worktree) and auto-title from first prompt
-8.  Call Provider.Prompt(sessionID, content) → returns event channel
-9.  StreamContext reads events, buffers text + tool invocations
-10. Active Tasks board refreshes periodically, showing tool progress
-11. On completion → send final response as reply to original message
-12. Auto-merge worktree branch back to main (if applicable)
-    → On merge failure: send notification with "Fix with Claude" button
-13. Board removes task; disappears when all tasks complete
-14. Cleanup (temp image files, stream context)
+users/{uid}/
+├── instances/{id}                           # Instance record
+│   ├── id, name, directory, port, password
+│   ├── status, auto_start, provider_type
+│   ├── client_id                            # Which Go client owns this
+│   ├── created_at, updated_at
+│   └── sessions/{sid}                       # Session record
+│       ├── id, instance_id, title
+│       ├── worktree_path, branch
+│       ├── message_count, created_at, updated_at
+│       └── messages/{mid}                   # Message record
+│           ├── id, role, content
+│           ├── tool_calls[]                 # {name, status, detail, input, output}
+│           └── created_at
+├── clients/{clientId}                       # Client registration
+│   ├── client_id, hostname
+│   ├── started_at, updated_at
+├── config/
+│   ├── user                                 # User-level config (shared across clients)
+│   │   ├── telegram.token
+│   │   ├── telegram.allowed_users
+│   │   ├── telegram.board_interval
+│   │   ├── web.enabled
+│   │   └── web.addr
+│   └── clients/{clientId}                   # Per-client config
+│       ├── process.opencode_binary
+│       ├── process.claudecode_binary
+│       ├── process.port_range_start
+│       ├── process.port_range_end
+│       ├── process.health_check_interval
+│       └── process.max_restart_attempts
 ```
 
-### Manager Restart
+### RTDB (real-time ephemeral data)
+
+All paths are under `users/{uid}/`.
 
 ```
-1. Open SQLite database, run migrations
-2. Query instances WHERE status='running' OR auto_start=1
-3. For each: allocate new port (OpenCode), update DB, spawn provider
-4. Query all instances → load stopped ones into memory
-5. Start SSE listeners for running OpenCode instances
-6. Pre-register projects from config (with provider type)
-7. Start web dashboard (if enabled)
-8. Start health check goroutine
-9. Run Telegram bot (blocking)
+users/{uid}/
+├── clients/{clientId}/presence              # Client heartbeat
+│   ├── online: boolean
+│   └── last_seen: number (ms)
+├── instances/{id}/runtime                   # Instance presence
+│   ├── online: boolean
+│   ├── client_id: string
+│   └── last_seen: number (ms)
+├── streams/{sessionId}                      # Live streaming content
+│   ├── content: string
+│   ├── status: "streaming" | "complete" | "error"
+│   ├── tool_calls: [{name, status, detail}]
+│   ├── client_id: string
+│   ├── error?: string
+│   └── updated_at: number (ms)
+├── commands/{instanceId}/{cmdId}            # Web frontend commands
+│   ├── action: string
+│   ├── payload: object
+│   ├── status: "pending" | "ack" | "done" | "error"
+│   ├── user_id: string
+│   ├── acked_by_client_id?: string
+│   ├── result?: object
+│   ├── error?: string
+│   └── updated_at: number (ms)
+└── telegram/
+    ├── user_state/{telegramUserId}          # Active instance/session per Telegram user
+    │   ├── active_instance_id: string
+    │   ├── active_session_id: string
+    │   └── updated_at: number (ms)
+    └── message_sessions/{chatId}_{msgId}    # Telegram message-to-session mapping
+        └── session_id: string
 ```
+
+## Data Flows
+
+### Boot Sequence
+
+```
+1. Read credentials.yaml (Firebase connection info + client_id)
+2. Auto-generate client_id if missing, persist to file
+3. Sign in to Firebase (refresh token or email/password)
+4. Extract UID from JWT
+5. Create FirestoreStore scoped to users/{uid}/
+6. Pull user config from Firestore (users/{uid}/config/user)
+7. Pull client config from Firestore (users/{uid}/config/clients/{clientId})
+8. If no config found: attempt migration from legacy RTDB /config
+9. If still no config: exit with hint to run 'login'
+10. Build Config from settings maps, apply env overrides
+11. Validate config
+12. Create App (process manager, bot, web server, Firebase background services)
+13. Register client in Firestore
+14. Restore previously running instances
+15. Start presence heartbeats + command listener
+16. Start web dashboard (if enabled)
+17. Start Telegram bot (blocking)
+```
+
+### Telegram Prompt Flow
+
+```
+1. Telegram message arrives → auth check (allowed_users)
+2. If reply to a bot message → look up session from RTDB message_sessions
+3. Otherwise → read user state from RTDB → active_instance_id
+4. If new session needed and provider supports worktree:
+   → Show worktree choice keyboard, wait for selection
+5. Create session (with or without worktree), auto-title from first prompt
+6. Provider.Prompt(sessionID, content) → returns StreamEvent channel
+7. StreamManager (bot layer) reads events, buffers text + tool progress
+8. Active Tasks board refreshes on timer (default 2s):
+   - Shows all running tasks as blockquote cards
+   - Displays tool invocations with progress icons
+   - "Stop #N" buttons to cancel individual tasks
+9. Streamer (Firebase layer) wraps channel, flushes to RTDB every 300ms
+   → Web frontend sees updates via onValue(/streams/{sessionId})
+10. On completion:
+    - Final response sent as reply to original Telegram message
+    - User + assistant messages persisted to Firestore
+    - Auto-merge worktree branch back to main (if applicable)
+    - Board removes completed task
+```
+
+### Web Command Flow (via Firebase)
+
+```
+1. Web frontend pushes command to RTDB:
+   users/{uid}/commands/{instanceId}/{cmdId}
+   { action: "prompt", payload: {...}, status: "pending" }
+2. Go CommandListener (SSE on /commands) detects new command
+3. Go updates status → "ack" with acked_by_client_id
+4. Go dispatches command (create/start/stop/delete/prompt/create_session/list_sessions)
+5. For prompt commands:
+   - Provider.Prompt() → event channel
+   - Streamer.WrapEvents() writes to RTDB /streams/{sessionId} every 300ms
+   - Web frontend reads /streams/{sessionId} via onValue
+6. Go updates command status → "done" (with result) or "error"
+```
+
+### Presence Heartbeats
+
+```
+Two-level heartbeats, both via RTDB PATCH every 30 seconds:
+
+Client level:  users/{uid}/clients/{clientId}/presence
+               { online: true, last_seen: <ms> }
+
+Instance level: users/{uid}/instances/{id}/runtime
+                { online: true, client_id: <id>, last_seen: <ms> }
+
+On shutdown: all entries marked online: false
+On instance start: immediate heartbeat for new instance
+On instance stop: immediate offline mark
+```
+
+## Security
+
+### Firestore Rules
+
+```
+match /users/{uid}/{document=**} {
+  allow read, write: if request.auth != null && request.auth.uid == uid;
+}
+```
+
+Every user can only read/write documents under their own `users/{uid}/` subtree.
+
+### RTDB Rules
+
+```json
+{
+  "users": {
+    "$uid": {
+      ".read": "auth != null && auth.uid === $uid",
+      ".write": "auth != null && auth.uid === $uid"
+    }
+  },
+  "link_codes": {
+    "$code": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    }
+  }
+}
+```
+
+Same user-scoping pattern. `link_codes` is accessible to any authenticated user (used for optional Telegram account linking).
+
+### Authentication
+
+The Go process authenticates via the Firebase REST API as a regular user. Two modes:
+
+- **Refresh token** (default, from browser login) -- uses `securetoken.googleapis.com/v1/token` to exchange for ID tokens
+- **Email/password** -- uses `identitytoolkit.googleapis.com/v1/accounts:signInWithPassword`
+
+ID tokens are cached and auto-refreshed 5 minutes before expiry (tokens expire after 3600 seconds).
 
 ## Dependencies
 
 | Package | Version | Purpose |
 |---------|---------|---------|
 | `github.com/go-telegram/bot` | v1.19 | Telegram Bot API client |
-| `modernc.org/sqlite` | v1.46 | Pure-Go SQLite driver (no CGo) |
-| `gopkg.in/yaml.v3` | v3.0 | YAML config parsing |
-| `github.com/google/uuid` | v1.6 | UUID generation for instance IDs |
-| `github.com/yuin/goldmark` | v1.5 | Markdown → HTML conversion |
+| `github.com/google/uuid` | v1.6 | UUID generation for instance and client IDs |
+| `github.com/yuin/goldmark` | v1.5 | Markdown to HTML conversion |
+| `gopkg.in/yaml.v3` | v3.0 | YAML parsing for credentials.yaml |
 
-No CGo required — the binary is fully statically linkable.
+No CGo required. The binary is fully statically linkable.
