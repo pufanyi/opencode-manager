@@ -619,9 +619,12 @@ func runServe() {
 	clientConfig, _ := st.GetClientConfig(fbClient.ClientID())
 
 	if len(userConfig) == 0 {
-		slog.Info("no config found in Firestore — run 'login' to set up configuration")
-		slog.Info("hint: use the login command to configure Telegram token, allowed users, etc.")
-		os.Exit(1)
+		// Try to migrate config from legacy RTDB /config.
+		userConfig, clientConfig = migrateFromRTDB(ctx, fbClient, st, creds.ClientID)
+		if len(userConfig) == 0 {
+			slog.Info("no config found — run 'login' to set up configuration")
+			os.Exit(1)
+		}
 	}
 
 	slog.Info("config loaded from Firestore", "user_keys", len(userConfig), "client_keys", len(clientConfig))
@@ -795,4 +798,62 @@ func isInteractiveTerminal() bool {
 		return false
 	}
 	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+// migrateFromRTDB reads legacy config from RTDB /config and migrates it
+// to Firestore user/client config docs. Returns the migrated configs.
+func migrateFromRTDB(ctx context.Context, fbClient *firebase.Client, st store.Store, clientID string) (userConfig, clientConfig map[string]string) {
+	var raw map[string]interface{}
+	if err := fbClient.RTDB.Get(ctx, "config", &raw); err != nil || len(raw) == 0 {
+		return nil, nil
+	}
+
+	slog.Info("found legacy config in RTDB /config, migrating to Firestore...", "keys", len(raw))
+
+	// Convert to flat string map.
+	legacy := make(map[string]string, len(raw))
+	for k, v := range raw {
+		legacy[k] = fmt.Sprint(v)
+	}
+
+	// Split into user-level and client-level settings.
+	userConfig = make(map[string]string)
+	clientConfig = make(map[string]string)
+
+	userKeys := map[string]bool{
+		"telegram.token": true, "telegram.allowed_users": true,
+		"telegram.board_interval": true, "web.enabled": true, "web.addr": true,
+	}
+	clientKeys := map[string]bool{
+		"process.opencode_binary": true, "process.claudecode_binary": true,
+		"process.port_range_start": true, "process.port_range_end": true,
+		"process.health_check_interval": true, "process.max_restart_attempts": true,
+	}
+
+	for k, v := range legacy {
+		if userKeys[k] {
+			userConfig[k] = v
+		} else if clientKeys[k] {
+			clientConfig[k] = v
+		}
+	}
+
+	// Write to Firestore.
+	if len(userConfig) > 0 {
+		if err := st.SetUserConfig(userConfig); err != nil {
+			slog.Error("failed to migrate user config to Firestore", "error", err)
+			return nil, nil
+		}
+	}
+	if len(clientConfig) > 0 {
+		if err := st.SetClientConfig(clientID, clientConfig); err != nil {
+			slog.Error("failed to migrate client config to Firestore", "error", err)
+			return userConfig, nil
+		}
+	}
+
+	slog.Info("config migrated from RTDB to Firestore",
+		"user_keys", len(userConfig), "client_keys", len(clientConfig))
+
+	return userConfig, clientConfig
 }
