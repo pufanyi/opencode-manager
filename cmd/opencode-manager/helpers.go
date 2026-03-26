@@ -40,10 +40,6 @@ func maskToken(token string) string {
 	return token[:6] + "..." + token[len(token)-4:]
 }
 
-func printLoginStep(n int, title string) {
-	fmt.Printf("  \033[1mStep %d/%d: %s\033[0m\n", n, totalLoginSteps, title)
-}
-
 func printOK(format string, args ...any) {
 	fmt.Printf("  \033[32m✓ %s\033[0m\n", fmt.Sprintf(format, args...))
 }

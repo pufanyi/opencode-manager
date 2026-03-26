@@ -21,54 +21,6 @@ type firebaseProjectConfig struct {
 	ProjectID   string
 }
 
-func resolveFirebaseProjectConfig(credPath, apiKey, databaseURL, authDomain, projectID string) (firebaseProjectConfig, error) {
-	cfg := firebaseProjectConfig{
-		APIKey:      defaultAPIKey,
-		DatabaseURL: defaultDBURL,
-		AuthDomain:  defaultAuthDom,
-		ProjectID:   defaultProjID,
-	}
-
-	if creds, err := readCredentials(credPath); err == nil {
-		if creds.Firebase.APIKey != "" {
-			cfg.APIKey = creds.Firebase.APIKey
-		}
-		if creds.Firebase.DatabaseURL != "" {
-			cfg.DatabaseURL = creds.Firebase.DatabaseURL
-		}
-		if creds.Firebase.AuthDomain != "" {
-			cfg.AuthDomain = creds.Firebase.AuthDomain
-		}
-		if creds.Firebase.ProjectID != "" {
-			cfg.ProjectID = creds.Firebase.ProjectID
-		}
-	}
-
-	if apiKey != "" {
-		cfg.APIKey = apiKey
-	}
-	if databaseURL != "" {
-		cfg.DatabaseURL = databaseURL
-	}
-	if projectID != "" {
-		cfg.ProjectID = projectID
-	}
-	if authDomain != "" {
-		cfg.AuthDomain = authDomain
-	}
-
-	if cfg.ProjectID == "" {
-		cfg.ProjectID = deriveProjectID(cfg.DatabaseURL)
-	}
-	if cfg.AuthDomain == "" && cfg.ProjectID != "" {
-		cfg.AuthDomain = cfg.ProjectID + ".firebaseapp.com"
-	}
-	if cfg.APIKey == "" || cfg.DatabaseURL == "" || cfg.AuthDomain == "" || cfg.ProjectID == "" {
-		return firebaseProjectConfig{}, fmt.Errorf("api_key, database_url, auth_domain, and project_id are required for login")
-	}
-	return cfg, nil
-}
-
 func projectConfigFromCredentials(creds *credentialsFile) (firebaseProjectConfig, error) {
 	cfg := firebaseProjectConfig{
 		APIKey:      creds.Firebase.APIKey,

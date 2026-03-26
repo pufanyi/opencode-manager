@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/pufanyi/opencode-manager/internal/firebase"
 	"github.com/pufanyi/opencode-manager/internal/firebase/loginpage"
 	"github.com/pufanyi/opencode-manager/internal/store"
 )
@@ -25,22 +23,14 @@ type loginResult struct {
 	UID          string `json:"uid"`
 }
 
-const totalLoginSteps = 4
-
-func runLogin() {
-	fs := flag.NewFlagSet("login", flag.ExitOnError)
-	credPath := fs.String("credentials", "./credentials.yaml", "path to Firebase credentials file")
-	apiKeyFlag := fs.String("api-key", "", "Firebase web API key")
-	databaseURLFlag := fs.String("database-url", "", "Firebase Realtime Database URL")
-	authDomainFlag := fs.String("auth-domain", "", "Firebase auth domain")
-	projectIDFlag := fs.String("project-id", "", "Firebase project ID")
-	_ = fs.Parse(os.Args[2:])
-
-	reader := bufio.NewReader(os.Stdin)
-	projectCfg, err := resolveFirebaseProjectConfig(*credPath, *apiKeyFlag, *databaseURLFlag, *authDomainFlag, *projectIDFlag)
-	if err != nil {
-		printFail("Invalid Firebase project configuration: %v", err)
-		os.Exit(1)
+// doFirstTimeSetup runs an inline browser login and saves credentials.yaml.
+// Called when credentials.yaml does not exist.
+func doFirstTimeSetup(credPath string) (*credentialsFile, error) {
+	projectCfg := firebaseProjectConfig{
+		APIKey:      defaultAPIKey,
+		DatabaseURL: defaultDBURL,
+		AuthDomain:  defaultAuthDom,
+		ProjectID:   defaultProjID,
 	}
 
 	fmt.Println()
@@ -48,20 +38,7 @@ func runLogin() {
 	fmt.Println("  \033[1m\033[36m│     OpenCode Manager Setup           │\033[0m")
 	fmt.Println("  \033[1m\033[36m└──────────────────────────────────────┘\033[0m")
 	fmt.Println()
-
-	if _, err := os.Stat(*credPath); err == nil {
-		fmt.Printf("  \033[33m! %s already exists. Overwrite? [y/N]: \033[0m", *credPath)
-		ans, _ := reader.ReadString('\n')
-		ans = strings.TrimSpace(strings.ToLower(ans))
-		if ans != "y" && ans != "yes" {
-			fmt.Println("  Aborted.")
-			return
-		}
-		fmt.Println()
-	}
-
-	// ── Step 1: Browser login ──────────────────────────────────────────
-	printLoginStep(1, "Sign in to Firebase")
+	fmt.Println("  \033[1mStep 1: Sign in to Firebase\033[0m")
 	fmt.Println("  \033[33mA browser window will open. Sign in with Google or email.\033[0m")
 	fmt.Println()
 
@@ -69,148 +46,89 @@ func runLogin() {
 	printOK("Signed in as %s", email)
 	fmt.Println()
 
-	// Connect to Firebase for subsequent steps.
-	loginClientID := uuid.New().String()
-	fbClient, err := firebase.NewClient(firebase.Config{
-		APIKey:       projectCfg.APIKey,
-		ServerAPIKey: defaultServerAPIKey,
-		DatabaseURL:  projectCfg.DatabaseURL,
-		ProjectID:    projectCfg.ProjectID,
-		RefreshToken: refreshToken,
-		ClientID:     loginClientID,
-	})
-	if err != nil {
-		printFail("Firebase connection failed: %v", err)
-		os.Exit(1)
-	}
-	ctx := context.Background()
+	creds := &credentialsFile{}
+	creds.Firebase.APIKey = projectCfg.APIKey
+	creds.Firebase.ServerAPIKey = defaultServerAPIKey
+	creds.Firebase.DatabaseURL = projectCfg.DatabaseURL
+	creds.Firebase.AuthDomain = projectCfg.AuthDomain
+	creds.Firebase.ProjectID = projectCfg.ProjectID
+	creds.Firebase.RefreshToken = refreshToken
+	creds.ClientID = uuid.New().String()
 
-	// Create store to read/write config.
-	loginStore := store.NewFirestoreStore(ctx, newFirestoreAdapter(fbClient), fbClient.UID())
-
-	// Check for existing config.
-	existing, _ := loginStore.GetUserConfig()
-	if existing == nil {
-		existing = make(map[string]string)
+	if err := writeCredentials(credPath, creds); err != nil {
+		return nil, fmt.Errorf("saving credentials: %w", err)
 	}
-	existingClient, _ := loginStore.GetClientConfig(loginClientID)
-	if existingClient == nil {
-		existingClient = make(map[string]string)
-	}
+	printOK("Credentials saved to %s", credPath)
+	fmt.Println()
 
-	// ── Step 2: Telegram Bot ───────────────────────────────────────────
-	printLoginStep(2, "Telegram Bot")
+	return creds, nil
+}
+
+// doConfigSetup prompts the user for Telegram and binary config, saves to Firestore.
+// Called when no config exists in Firestore.
+func doConfigSetup(st store.Store, clientID string) (userConfig, clientConfig map[string]string) {
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Println()
+	fmt.Println("  \033[1mConfigure Telegram Bot\033[0m")
 	fmt.Println("  \033[33mCreate a bot via @BotFather on Telegram to get your token.\033[0m")
 	fmt.Println()
 
-	defaultToken := existing["telegram.token"]
-	tokenDisplay := ""
-	if defaultToken != "" {
-		tokenDisplay = maskToken(defaultToken)
-	}
-	token := promptWithDefault(reader, "Bot token", defaultToken, tokenDisplay)
+	token := promptWithDefault(reader, "Bot token", "", "")
 	if token == "" {
-		token = defaultToken
+		printFail("Telegram bot token is required")
+		os.Exit(1)
 	}
 
-	defaultUsers := existing["telegram.allowed_users"]
 	fmt.Println("  \033[33mSend /start to @userinfobot to find your Telegram user ID.\033[0m")
-	users := promptWithDefault(reader, "Allowed user IDs (comma-separated)", defaultUsers, "")
+	users := promptWithDefault(reader, "Allowed user IDs (comma-separated)", "", "")
 	if users == "" {
-		users = defaultUsers
+		printFail("At least one allowed user ID is required")
+		os.Exit(1)
 	}
 	printOK("Telegram configured")
 	fmt.Println()
 
-	// ── Step 3: Binary paths ───────────────────────────────────────────
-	printLoginStep(3, "AI Coding Tools")
+	fmt.Println("  \033[1mConfigure AI Coding Tools\033[0m")
 
 	claudeBin := detectBinary("claude", "Claude Code")
-	defaultClaude := existingClient["process.claudecode_binary"]
-	if defaultClaude == "" {
-		defaultClaude = claudeBin
-	}
-	claudePath := promptWithDefault(reader, "Claude Code binary", defaultClaude, "")
+	claudePath := promptWithDefault(reader, "Claude Code binary", claudeBin, "")
 	if claudePath == "" {
-		claudePath = defaultClaude
+		claudePath = claudeBin
 	}
 
 	opencodeBin := detectBinary("opencode", "OpenCode")
-	defaultOpencode := existingClient["process.opencode_binary"]
-	if defaultOpencode == "" {
-		defaultOpencode = opencodeBin
-	}
-	opencodePath := promptWithDefault(reader, "OpenCode binary", defaultOpencode, "")
+	opencodePath := promptWithDefault(reader, "OpenCode binary", opencodeBin, "")
 	if opencodePath == "" {
-		opencodePath = defaultOpencode
+		opencodePath = opencodeBin
 	}
 
 	printOK("Tools configured")
 	fmt.Println()
 
-	// ── Step 4: Save everything ────────────────────────────────────────
-	printLoginStep(4, "Save configuration")
-
-	// Save credentials locally (with auto-generated client_id).
-	credClientID := uuid.New().String()
-	content := fmt.Sprintf(`firebase:
-  api_key: %q
-  server_api_key: %q
-  database_url: %q
-  auth_domain: %q
-  project_id: %q
-  refresh_token: %q
-client_id: %q
-`, projectCfg.APIKey, defaultServerAPIKey, projectCfg.DatabaseURL, projectCfg.AuthDomain, projectCfg.ProjectID, refreshToken, credClientID)
-
-	if err := os.WriteFile(*credPath, []byte(content), 0600); err != nil {
-		printFail("Failed to write %s: %v", *credPath, err)
-		os.Exit(1)
-	}
-	printOK("Credentials saved to %s", *credPath)
-
-	// Push user config to Firestore.
-	userSettings := map[string]string{
+	userConfig = map[string]string{
 		"telegram.token":         token,
 		"telegram.allowed_users": users,
 	}
-	for k, v := range existing {
-		if _, overridden := userSettings[k]; !overridden {
-			userSettings[k] = v
-		}
-	}
-
-	if err := loginStore.SetUserConfig(userSettings); err != nil {
-		printFail("Failed to push user config to Firestore: %v", err)
-		os.Exit(1)
-	}
-	printOK("User config pushed to Firestore (%d keys)", len(userSettings))
-
-	// Push client config to Firestore.
-	clientSettings := map[string]string{
+	clientConfig = map[string]string{
 		"process.claudecode_binary": claudePath,
 		"process.opencode_binary":   opencodePath,
 	}
-	for k, v := range existingClient {
-		if _, overridden := clientSettings[k]; !overridden {
-			clientSettings[k] = v
-		}
-	}
 
-	if err := loginStore.SetClientConfig(credClientID, clientSettings); err != nil {
-		printFail("Failed to push client config to Firestore: %v", err)
+	if err := st.SetUserConfig(userConfig); err != nil {
+		printFail("Failed to save user config: %v", err)
 		os.Exit(1)
 	}
-	printOK("Client config pushed to Firestore (%d keys)", len(clientSettings))
+	printOK("User config saved to Firestore")
+
+	if err := st.SetClientConfig(clientID, clientConfig); err != nil {
+		printFail("Failed to save client config: %v", err)
+		os.Exit(1)
+	}
+	printOK("Client config saved to Firestore")
 	fmt.Println()
 
-	// ── Done ───────────────────────────────────────────────────────────
-	fmt.Println("  \033[1m\033[32m┌──────────────────────────────────────┐\033[0m")
-	fmt.Println("  \033[1m\033[32m│           Setup Complete!            │\033[0m")
-	fmt.Println("  \033[1m\033[32m└──────────────────────────────────────┘\033[0m")
-	fmt.Println()
-	fmt.Printf("  Run: \033[36m%s\033[0m\n", os.Args[0])
-	fmt.Println()
+	return userConfig, clientConfig
 }
 
 func runRelogin() {

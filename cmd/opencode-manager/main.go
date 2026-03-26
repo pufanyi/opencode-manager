@@ -41,9 +41,6 @@ const (
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "login":
-			runLogin()
-			return
 		case "relogin":
 			runRelogin()
 			return
@@ -59,7 +56,6 @@ func runServe() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: opencode-manager [command] [flags]\n\n")
 		fmt.Fprintf(os.Stderr, "Commands:\n")
-		fmt.Fprintf(os.Stderr, "  login    Browser login + interactive cloud setup\n")
 		fmt.Fprintf(os.Stderr, "  relogin  Refresh Firebase browser credentials in credentials.yaml\n")
 		fmt.Fprintf(os.Stderr, "  (none)   Start the manager (default)\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
@@ -74,13 +70,21 @@ func runServe() {
 	creds, err := readCredentials(*credPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			slog.Error("credentials file not found",
-				"path", *credPath,
-				"hint", "copy credentials.yaml.example to credentials.yaml and fill in your Firebase project info")
+			if !isInteractiveTerminal() {
+				slog.Error("credentials file not found",
+					"path", *credPath,
+					"hint", "run opencode-manager in an interactive terminal for first-time setup")
+				os.Exit(1)
+			}
+			creds, err = doFirstTimeSetup(*credPath)
+			if err != nil {
+				slog.Error("first-time setup failed", "error", err)
+				os.Exit(1)
+			}
 		} else {
 			slog.Error("failed to read credentials", "error", err)
+			os.Exit(1)
 		}
-		os.Exit(1)
 	}
 
 	// Auto-generate client_id on first run.
@@ -144,8 +148,11 @@ func runServe() {
 		// Try to migrate config from legacy RTDB /config.
 		userConfig, clientConfig = migrateFromRTDB(ctx, fbClient, st, creds.ClientID)
 		if len(userConfig) == 0 {
-			slog.Info("no config found — run 'login' to set up configuration")
-			os.Exit(1)
+			if !isInteractiveTerminal() {
+				slog.Error("no config found — run opencode-manager in an interactive terminal for setup")
+				os.Exit(1)
+			}
+			userConfig, clientConfig = doConfigSetup(st, creds.ClientID)
 		}
 	}
 

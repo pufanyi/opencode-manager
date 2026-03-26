@@ -24,6 +24,7 @@ export class DashboardComponent implements OnInit, OnDestroy {
 
   isLinked: boolean | null = null;
   linkCode: string | null = null;
+  showLinkSection = false;
 
   private uid: string | null = null;
   private unsubLinkStatus: Unsubscribe | null = null;
@@ -42,23 +43,32 @@ export class DashboardComponent implements OnInit, OnDestroy {
       .subscribe((user) => {
         if (!user) return; // false = no user, guard will redirect
         this.uid = user.uid;
-        this.unsubLinkStatus = this.firebase.onUserLinkStatus(user.uid, async (isLinked) => {
-          this.isLinked = isLinked;
-          if (!isLinked && !this.linkCode) {
-            try {
-              this.linkCode = await this.firebase.generateLinkCode(user.uid);
-            } catch (e) {
-              console.error("Failed to generate link code", e);
-            }
-          }
 
-          // Start polling instances from Firestore if linked
-          if (isLinked && !this.instancePollTimer) {
-            this.loadInstances();
-            this.instancePollTimer = setInterval(() => this.loadInstances(), 5000);
-          }
+        // Always start loading instances immediately
+        this.loadInstances();
+        this.instancePollTimer = setInterval(() => this.loadInstances(), 5000);
+
+        // Check Telegram link status in the background (optional feature)
+        this.unsubLinkStatus = this.firebase.onUserLinkStatus(user.uid, (isLinked) => {
+          this.isLinked = isLinked;
         });
       });
+  }
+
+  async generateLinkCode() {
+    if (!this.uid || this.linkCode) return;
+    try {
+      this.linkCode = await this.firebase.generateLinkCode(this.uid);
+    } catch (e) {
+      console.error("Failed to generate link code", e);
+    }
+  }
+
+  toggleLinkSection() {
+    this.showLinkSection = !this.showLinkSection;
+    if (this.showLinkSection && !this.linkCode && !this.isLinked) {
+      this.generateLinkCode();
+    }
   }
 
   ngOnDestroy() {
