@@ -5,64 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/pufanyi/opencode-manager/internal/process"
 	"github.com/pufanyi/opencode-manager/internal/provider"
 )
-
-func (h *Handlers) HandleLink(ctx context.Context, b *bot.Bot, update *models.Update) {
-	if h.firebase == nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: "Firebase is not enabled."})
-		return
-	}
-
-	parts := strings.Fields(update.Message.Text)
-	if len(parts) < 2 {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: "Usage: /link <code>"})
-		return
-	}
-	code := parts[1]
-
-	var data map[string]interface{}
-	err := h.firebase.RTDB.Get(ctx, "link_codes/"+code, &data)
-	if err != nil || data == nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: "Invalid or expired link code."})
-		return
-	}
-
-	uid, ok := data["uid"].(string)
-	if !ok || uid == "" {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: "Invalid link code data."})
-		return
-	}
-
-	expiresFloat, ok := data["expires"].(float64)
-	if !ok {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: "Invalid link code data."})
-		return
-	}
-
-	if time.Now().UnixMilli() > int64(expiresFloat) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: "Link code has expired."})
-		return
-	}
-
-	err = h.firebase.RTDB.Set(ctx, "users/"+uid+"/telegram_id", update.Message.From.ID)
-	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: "Failed to link account."})
-		return
-	}
-
-	_ = h.firebase.RTDB.Delete(ctx, "link_codes/"+code)
-
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: update.Message.Chat.ID,
-		Text:   "✅ Successfully linked your Telegram account to the Web Dashboard! You can now use the dashboard.",
-	})
-}
 
 func (h *Handlers) HandleStart(ctx context.Context, b *bot.Bot, update *models.Update) {
 	text := `Welcome to <b>OpenCode Manager</b>!

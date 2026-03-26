@@ -80,7 +80,6 @@ func New(cfg *config.TelegramConfig, procMgr *process.Manager, st store.Store, t
 	b.RegisterHandlerMatchFunc(matchCommand("/session"), authMiddleware(handlers.HandleSession))
 	b.RegisterHandlerMatchFunc(matchCommand("/sessions"), authMiddleware(handlers.HandleSessions))
 	b.RegisterHandlerMatchFunc(matchCommand("/abort"), authMiddleware(handlers.HandleAbort))
-	b.RegisterHandlerMatchFunc(matchCommand("/link"), authMiddleware(handlers.HandleLink))
 
 	return &Bot{
 		bot:      b,
@@ -109,7 +108,6 @@ func (b *Bot) Start(ctx context.Context) {
 			{Command: "stop", Description: "Stop an instance"},
 			{Command: "start_inst", Description: "Start a stopped instance"},
 			{Command: "abort", Description: "Abort running prompt"},
-			{Command: "link", Description: "Link Web Dashboard account"},
 			{Command: "help", Description: "Show help"},
 		},
 	})
