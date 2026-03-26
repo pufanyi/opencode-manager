@@ -43,6 +43,8 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
   loadingHistory = false;
 
   private unsubStream: Unsubscribe | null = null;
+  private unsubCommand: Unsubscribe | null = null;
+  private promptTimeout: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private firebase: FirebaseService) {}
 
@@ -156,10 +158,48 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
     this.listenToStream(this.selectedSessionId);
 
     try {
-      await this.firebase.sendCommand(this.uid, this.instance.id, "prompt", {
+      const commandId = await this.firebase.sendCommand(this.uid, this.instance.id, "prompt", {
         session_id: this.selectedSessionId,
         content,
       });
+
+      // Watch the command status so we catch backend errors that happen
+      // before the stream is initialised (e.g. wrong client, missing instance).
+      this.unsubCommand = this.firebase.onCommandResult(
+        this.uid,
+        this.instance.id,
+        commandId,
+        (cmd) => {
+          if (cmd.status === "error") {
+            this.responseText = cmd.error || "Command failed";
+            this.streaming = false;
+            this.history = [
+              ...this.history,
+              { role: "assistant", content: `[ERROR] ${cmd.error || "Command failed"}`, toolCalls: [] },
+            ];
+            this.cleanupCommand();
+            this.cleanup();
+            this.scrollToBottom();
+          } else if (cmd.status === "done" || cmd.status === "ack") {
+            // Backend picked up the command — stop watching, stream listener takes over.
+            this.cleanupCommand();
+          }
+        },
+      );
+
+      // Safety timeout: if nothing happens in 30s, stop waiting.
+      this.promptTimeout = setTimeout(() => {
+        if (this.streaming && !this.responseText) {
+          this.streaming = false;
+          this.history = [
+            ...this.history,
+            { role: "assistant", content: "[ERROR] No response from backend (timeout)", toolCalls: [] },
+          ];
+          this.cleanup();
+          this.cleanupCommand();
+          this.scrollToBottom();
+        }
+      }, 30000);
     } catch {
       this.streaming = false;
     }
@@ -206,6 +246,16 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
   private cleanup() {
     this.unsubStream?.();
     this.unsubStream = null;
+    this.cleanupCommand();
+  }
+
+  private cleanupCommand() {
+    this.unsubCommand?.();
+    this.unsubCommand = null;
+    if (this.promptTimeout) {
+      clearTimeout(this.promptTimeout);
+      this.promptTimeout = null;
+    }
   }
 
   private scrollToBottom(): void {
