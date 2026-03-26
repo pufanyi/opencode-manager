@@ -1,4 +1,4 @@
-.PHONY: build run dev clean setup tidy web lint
+.PHONY: build run dev clean setup tidy dashboard web lint
 
 BINARY := opencode-manager
 BUILD_DIR := ./bin
@@ -6,10 +6,13 @@ BUILD_DIR := ./bin
 setup: build
 	$(BUILD_DIR)/$(BINARY) setup
 
+dashboard:
+	cd dashboard && npm run build -- --output-path ../internal/web/dist
+
 web:
 	cd web && pnpm ng build --output-path ../internal/web/dist
 
-build: web
+build: dashboard
 	go build -o $(BUILD_DIR)/$(BINARY) ./cmd/opencode-manager
 
 run: build
@@ -21,6 +24,7 @@ dev:
 	go run ./cmd/opencode-manager -dev
 
 lint:
+	cd dashboard && npx biome check src/ || true
 	cd web && pnpm biome check src/
 	golangci-lint run ./...
 

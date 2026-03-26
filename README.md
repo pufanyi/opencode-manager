@@ -135,15 +135,23 @@ internal/
 ├── opencode/                OpenCode HTTP client
 └── web/                     Embedded web dashboard (serves Angular build)
 
-web/                         Angular 19 frontend source
+dashboard/                   Angular 19 — Local dashboard (direct HTTP API + SSE)
 └── src/app/
-    ├── services/firebase.service.ts   Firebase Auth + RTDB + Firestore (user-scoped)
-    ├── guards/auth.guard.ts           Route guard
+    ├── services/api.service.ts                 Direct HTTP + SSE to Go server
     └── components/
-        ├── login/                     Google / email login
-        ├── dashboard/                 Instance grid + account linking
-        ├── instance-card/             Instance status card
-        └── prompt-panel/              Session selector + streaming view
+        ├── instance-list/                      Instance management (create/start/stop/delete)
+        ├── prompt-panel/                       Prompt + streaming via SSE (/api/ws)
+        └── settings/                           Bot status, app settings
+
+web/                         Angular 19 — Remote frontend (Firebase relay)
+└── src/app/
+    ├── services/firebase.service.ts            Firebase Auth + RTDB + Firestore
+    ├── guards/auth.guard.ts                    Route guard
+    └── components/
+        ├── login/                              Google / email login
+        ├── dashboard/                          Instance grid + account linking
+        ├── instance-card/                      Instance status card
+        └── prompt-panel/                       Session selector + streaming view
 ```
 
 ## CLI Reference
