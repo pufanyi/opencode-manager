@@ -10,6 +10,9 @@
       "style": {
         "noNonNullAssertion": "off",
         "useImportType": "off"
+      },
+      "complexity": {
+        "useLiteralKeys": "off"
       }
     }
   },
