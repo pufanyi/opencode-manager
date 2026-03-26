@@ -4,15 +4,36 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 )
+
+// sseClient is an HTTP client optimised for long-lived SSE connections.
+// It forces HTTP/1.1 (Firebase RTDB SSE works more reliably over HTTP/1.1)
+// and keeps TCP keep-alive enabled so the OS detects dead peers.
+var sseClient = &http.Client{
+	Transport: &http.Transport{
+		// Force HTTP/1.1 — disable HTTP/2 by providing a non-nil but empty TLSNextProto.
+		TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout: 10 * time.Second,
+		// No idle timeout — SSE connections live for a long time.
+		IdleConnTimeout: 0,
+	},
+	// No overall timeout — the SSE stream runs indefinitely.
+	Timeout: 0,
+}
 
 // RTDB is a client for Firebase Realtime Database REST API.
 type RTDB struct {
@@ -177,12 +198,17 @@ func (r *RTDB) listenOnce(ctx context.Context, path string, events chan<- SSEEve
 		return err
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Cache-Control", "no-cache")
 
-	resp, err := http.DefaultClient.Do(req)
+	connStart := time.Now()
+	resp, err := sseClient.Do(req)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		resp.Body.Close()
+		slog.Debug("firebase SSE connection closed", "path", path, "duration", time.Since(connStart).Round(time.Second))
+	}()
 
 	if resp.StatusCode != 200 {
 		return r.responseError("SSE connect", path, resp)
