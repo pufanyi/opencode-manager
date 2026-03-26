@@ -252,3 +252,20 @@ func (s *Server) handleAbort(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, map[string]string{"status": "aborted"})
 }
+
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		writeError(w, 405, "method not allowed")
+		return
+	}
+
+	result := map[string]any{
+		"web": true,
+	}
+	if s.statusFunc != nil {
+		for k, v := range s.statusFunc() {
+			result[k] = v
+		}
+	}
+	writeJSON(w, result)
+}

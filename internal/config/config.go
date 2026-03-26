@@ -187,12 +187,6 @@ func ApplyEnvOverrides(cfg *Config) {
 
 // Validate checks that the config is valid.
 func Validate(cfg *Config) error {
-	if cfg.Telegram.Token == "" {
-		return fmt.Errorf("telegram.token is required")
-	}
-	if len(cfg.Telegram.AllowedUsers) == 0 {
-		return fmt.Errorf("telegram.allowed_users must have at least one user")
-	}
 	if cfg.Process.PortRange.Start >= cfg.Process.PortRange.End {
 		return fmt.Errorf("port_range.start must be less than port_range.end")
 	}
@@ -200,6 +194,11 @@ func Validate(cfg *Config) error {
 		return fmt.Errorf("port_range must be within 1024-65535")
 	}
 	return nil
+}
+
+// TelegramReady returns true if the Telegram config has enough info to start the bot.
+func (c *Config) TelegramReady() bool {
+	return c.Telegram.Token != "" && len(c.Telegram.AllowedUsers) > 0
 }
 
 func parseIntList(s string) []int64 {

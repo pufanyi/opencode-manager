@@ -18,11 +18,15 @@ import (
 //go:embed all:dist
 var distFS embed.FS
 
+// StatusFunc returns the current application status for the settings API.
+type StatusFunc func() map[string]any
+
 type Server struct {
-	procMgr *process.Manager
-	store   store.Store
-	addr    string
-	server  *http.Server
+	procMgr    *process.Manager
+	store      store.Store
+	addr       string
+	server     *http.Server
+	statusFunc StatusFunc
 
 	// WebSocket hub for streaming
 	hub *StreamHub
@@ -41,6 +45,11 @@ func NewServer(addr string, procMgr *process.Manager, st store.Store) *Server {
 	return s
 }
 
+// SetStatusFunc sets the callback used by the /api/settings endpoint.
+func (s *Server) SetStatusFunc(fn StatusFunc) {
+	s.statusFunc = fn
+}
+
 // SetDevProxy configures the server to reverse-proxy non-API requests
 // to an Angular dev server instead of serving embedded files.
 func (s *Server) SetDevProxy(dp *DevProxy) {
@@ -56,6 +65,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/sessions/", s.handleSessions)
 	mux.HandleFunc("/api/prompt", s.handlePrompt)
 	mux.HandleFunc("/api/abort", s.handleAbort)
+	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/ws", s.hub.HandleWebSocket)
 
 	if s.devProxy != nil {
@@ -104,6 +114,11 @@ func (s *Server) Stop() {
 		defer cancel()
 		s.server.Shutdown(ctx)
 	}
+}
+
+// Addr returns the listen address of the server.
+func (s *Server) Addr() string {
+	return s.addr
 }
 
 // Hub returns the stream hub for broadcasting events from providers.

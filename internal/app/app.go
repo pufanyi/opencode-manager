@@ -40,44 +40,41 @@ func New(cfg *config.Config, st store.Store, fbClient *firebase.Client, devMode 
 		cfg.Process.MaxRestartAttempts,
 	)
 
-	// Create TelegramState for bot handlers.
-	tgState := firebase.NewTelegramState(fbClient.RTDB, fbClient.UID())
-
-	tgBot, err := bot.New(&cfg.Telegram, procMgr, st, tgState)
-	if err != nil {
-		return nil, err
-	}
-
-	procMgr.SetCrashCallback(func(inst *process.Instance, err error) {
-		tgBot.NotifyCrash(inst.Name, err)
-	})
-
 	app := &App{
 		cfg:      cfg,
 		store:    st,
 		procMgr:  procMgr,
-		bot:      tgBot,
 		firebase: fbClient,
 		devMode:  devMode,
 	}
 
 	// Firebase streamer for real-time events.
-	app.bot.SetFirebase(fbClient)
 	procMgr.SetFirebaseStreamer(fbClient.Streamer)
 
-	// In dev mode, force-enable web dashboard
-	if devMode && !cfg.Web.Enabled {
-		cfg.Web.Enabled = true
+	// Telegram bot (optional — failure does not block startup).
+	if cfg.TelegramReady() {
+		tgState := firebase.NewTelegramState(fbClient.RTDB, fbClient.UID())
+		tgBot, err := bot.New(&cfg.Telegram, procMgr, st, tgState)
+		if err != nil {
+			slog.Warn("telegram bot unavailable, web dashboard will still work", "error", err)
+		} else {
+			app.bot = tgBot
+			app.bot.SetFirebase(fbClient)
+			procMgr.SetCrashCallback(func(inst *process.Instance, err error) {
+				tgBot.NotifyCrash(inst.Name, err)
+			})
+		}
+	} else {
+		slog.Info("telegram not configured, skipping bot startup")
 	}
 
-	// Web dashboard
-	if cfg.Web.Enabled {
-		addr := cfg.Web.Addr
-		if addr == "" {
-			addr = ":8080"
-		}
-		app.web = web.NewServer(addr, procMgr, st)
+	// Web dashboard (always enabled).
+	addr := cfg.Web.Addr
+	if addr == "" {
+		addr = ":8080"
 	}
+	app.web = web.NewServer(addr, procMgr, st)
+	app.web.SetStatusFunc(app.settingsStatus)
 
 	return app, nil
 }
@@ -114,22 +111,25 @@ func (a *App) Start(ctx context.Context) error {
 
 	a.firebase.StartBackground(ctx, instanceIDs)
 
-	// Start web dashboard
-	if a.web != nil {
-		if a.devMode {
-			dp, err := web.StartDevProxy("web")
-			if err != nil {
-				return fmt.Errorf("starting angular dev server: %w", err)
-			}
-			a.web.SetDevProxy(dp)
+	// Start web dashboard.
+	if a.devMode {
+		dp, err := web.StartDevProxy("web")
+		if err != nil {
+			return fmt.Errorf("starting angular dev server: %w", err)
 		}
-		if err := a.web.Start(ctx); err != nil {
-			slog.Error("failed to start web dashboard", "error", err)
-		}
+		a.web.SetDevProxy(dp)
+	}
+	if err := a.web.Start(ctx); err != nil {
+		slog.Error("failed to start web dashboard", "error", err)
 	}
 
-	// Start bot (blocking)
-	a.bot.Start(ctx)
+	// Start bot (blocking). If no bot, block on context.
+	if a.bot != nil {
+		a.bot.Start(ctx)
+	} else {
+		slog.Info("running without telegram bot, web dashboard at " + a.web.Addr())
+		<-ctx.Done()
+	}
 
 	return nil
 }
@@ -279,12 +279,20 @@ func appendToolCall(calls []store.ToolCall, evt provider.StreamEvent) []store.To
 	})
 }
 
+func (a *App) settingsStatus() map[string]any {
+	status := map[string]any{
+		"telegram_configured": a.cfg.TelegramReady(),
+		"telegram_connected":  a.bot != nil,
+	}
+	return status
+}
+
 func (a *App) Shutdown() {
 	slog.Info("shutting down")
-	a.bot.Stop()
-	if a.web != nil {
-		a.web.Stop()
+	if a.bot != nil {
+		a.bot.Stop()
 	}
+	a.web.Stop()
 	a.procMgr.Shutdown()
 	// Note: store is closed by main, not by app
 }
