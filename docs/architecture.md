@@ -49,13 +49,20 @@ All persistent data lives in Firebase (Firestore for durable records, RTDB for r
 
 ## Package Structure
 
-### `cmd/opencode-manager/main.go`
+### `cmd/opencode-manager/`
 
 Entry point. Handles three subcommands:
 
 - `(default)` -- read `credentials.yaml`, sign in to Firebase, create FirestoreStore, load config from Firestore (with RTDB migration fallback), validate, start the application
 - `login` -- interactive browser-based setup: sign in via local HTTP server, configure Telegram bot and binary paths, push config to Firestore, write `credentials.yaml`
 - `relogin` -- refresh an expired browser credential without reconfiguring
+
+| File | Purpose |
+|------|---------|
+| `main.go` | Entry point, `runServe()`, signal handling |
+| `login.go` | Interactive login wizard (4-step browser-based setup) and `relogin` |
+| `setup.go` | Firebase config resolution, Firestore adapter, credential recovery, RTDB migration |
+| `helpers.go` | CLI utilities (read/write credentials, print, prompt, openBrowser) |
 
 ### `internal/app/`
 
@@ -80,9 +87,13 @@ Telegram bot implementation.
 | File | Purpose |
 |------|---------|
 | `bot.go` | Bot lifecycle, command routing, auth middleware |
-| `handlers.go` | Command handlers (`/new`, `/start`, `/stop`, etc.) and default prompt handler |
+| `handlers.go` | Shared types (`pendingPrompt`, `Handlers`), constructor, `getActiveInstance` |
+| `commands.go` | Command handlers (`/new`, `/list`, `/switch`, `/stop`, `/session`, etc.) |
+| `prompt.go` | Prompt flow (`HandlePrompt`, `HandlePhoto`, worktree choice, main-dir conflict, queue) |
 | `callbacks.go` | Inline keyboard callback handlers (worktree choice, session selection) |
-| `streaming.go` | Active Tasks board -- consolidated live status message with tool progress |
+| `stream_context.go` | Individual stream lifecycle (consume events, flush, send response, merge-back) |
+| `stream_manager.go` | Stream orchestrator (start, remove, stop task, notify) |
+| `board.go` | Active Tasks board -- rendering, refresh loop, stop-button keyboard |
 | `format.go` | Markdown-to-Telegram HTML conversion with tag balancing |
 | `keyboard.go` | Inline keyboard builders |
 
@@ -119,7 +130,8 @@ Instance lifecycle management.
 
 | File | Purpose |
 |------|---------|
-| `manager.go` | Creates, starts, stops, deletes instances. Crash recovery with exponential backoff. Health checks. |
+| `manager.go` | Creates, starts, stops, deletes instances. Provider factory. Shutdown. |
+| `manager_recovery.go` | Crash recovery with exponential backoff. Health checks. Instance restore on boot. |
 | `instance.go` | Wraps a `Provider` with metadata (name, directory, status, provider type, client ID) |
 | `portpool.go` | Thread-safe port allocator over a configurable range |
 
@@ -130,7 +142,10 @@ Provider abstraction with two implementations.
 | File | Purpose |
 |------|---------|
 | `provider.go` | `Provider` interface, `StreamEvent` type, `Type` constants (`claudecode`, `opencode`) |
-| `claudecode.go` | Claude Code provider -- spawns `claude -p` per prompt with `--output-format stream-json` |
+| `claudecode.go` | Claude Code core provider -- session CRUD, `Prompt()`, `Abort()`, lifecycle |
+| `claudecode_worktree.go` | Git worktree management (create, remove, merge, sync, FIFO eviction) |
+| `claudecode_maindir.go` | Main-directory exclusive locking (`IsMainDirBusy`, `TryAcquire`, `Release`) |
+| `claudecode_parser.go` | Stream-JSON event parsing, Claude event types, tool detail extraction |
 | `opencode.go` | OpenCode provider -- manages persistent `opencode serve` child process, HTTP REST + SSE |
 
 ### `internal/store/`
@@ -141,6 +156,7 @@ Persistence layer.
 |------|---------|
 | `iface.go` | `Store` interface + domain types (`Instance`, `ClaudeSession`, `ClientInfo`, `Message`, `ToolCall`) |
 | `firestore_store.go` | `FirestoreStore` -- Firestore-backed implementation of `Store`, scoped to `users/{uid}/` |
+| `firestore_helpers.go` | Serialization helpers (`docToInstance`, `docToSession`, `getString`, `getInt`, `parseTimestamp`) |
 | `firestore_adapter.go` | `FirestoreAdapter` -- closure-based bridge from `firebase.Firestore` to `store.FirestoreClient` (avoids import cycles) |
 
 ### `internal/web/`
@@ -149,7 +165,9 @@ Embedded web dashboard.
 
 | File | Purpose |
 |------|---------|
-| `server.go` | HTTP server with REST API endpoints + SSE streaming hub. Serves embedded Angular build via `go:embed`. |
+| `server.go` | HTTP server lifecycle, embedded Angular build via `go:embed`, CORS middleware |
+| `api.go` | REST API handlers (instances CRUD, sessions, prompt, abort) |
+| `hub.go` | SSE StreamHub for real-time event streaming to browser clients |
 | `devproxy.go` | Reverse proxy to Angular dev server for HMR during development |
 
 ### `internal/gitops/`
