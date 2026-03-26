@@ -65,23 +65,45 @@ func doFirstTimeSetup(credPath string) (*credentialsFile, error) {
 }
 
 // doConfigSetup prompts the user for Telegram and binary config, saves to Firestore.
-// Called when no config exists in Firestore.
+// It merges with any existing config already in Firestore.
 func doConfigSetup(st store.Store, clientID string) (userConfig, clientConfig map[string]string) {
 	reader := bufio.NewReader(os.Stdin)
+
+	// Load existing config as defaults.
+	existing, _ := st.GetUserConfig()
+	if existing == nil {
+		existing = make(map[string]string)
+	}
+	existingClient, _ := st.GetClientConfig(clientID)
+	if existingClient == nil {
+		existingClient = make(map[string]string)
+	}
 
 	fmt.Println()
 	fmt.Println("  \033[1mConfigure Telegram Bot\033[0m")
 	fmt.Println("  \033[33mCreate a bot via @BotFather on Telegram to get your token.\033[0m")
 	fmt.Println()
 
-	token := promptWithDefault(reader, "Bot token", "", "")
+	defaultToken := existing["telegram.token"]
+	tokenDisplay := ""
+	if defaultToken != "" {
+		tokenDisplay = maskToken(defaultToken)
+	}
+	token := promptWithDefault(reader, "Bot token", defaultToken, tokenDisplay)
+	if token == "" {
+		token = defaultToken
+	}
 	if token == "" {
 		printFail("Telegram bot token is required")
 		os.Exit(1)
 	}
 
+	defaultUsers := existing["telegram.allowed_users"]
 	fmt.Println("  \033[33mSend /start to @userinfobot to find your Telegram user ID.\033[0m")
-	users := promptWithDefault(reader, "Allowed user IDs (comma-separated)", "", "")
+	users := promptWithDefault(reader, "Allowed user IDs (comma-separated)", defaultUsers, "")
+	if users == "" {
+		users = defaultUsers
+	}
 	if users == "" {
 		printFail("At least one allowed user ID is required")
 		os.Exit(1)
@@ -92,15 +114,23 @@ func doConfigSetup(st store.Store, clientID string) (userConfig, clientConfig ma
 	fmt.Println("  \033[1mConfigure AI Coding Tools\033[0m")
 
 	claudeBin := detectBinary("claude", "Claude Code")
-	claudePath := promptWithDefault(reader, "Claude Code binary", claudeBin, "")
+	defaultClaude := existingClient["process.claudecode_binary"]
+	if defaultClaude == "" {
+		defaultClaude = claudeBin
+	}
+	claudePath := promptWithDefault(reader, "Claude Code binary", defaultClaude, "")
 	if claudePath == "" {
-		claudePath = claudeBin
+		claudePath = defaultClaude
 	}
 
 	opencodeBin := detectBinary("opencode", "OpenCode")
-	opencodePath := promptWithDefault(reader, "OpenCode binary", opencodeBin, "")
+	defaultOpencode := existingClient["process.opencode_binary"]
+	if defaultOpencode == "" {
+		defaultOpencode = opencodeBin
+	}
+	opencodePath := promptWithDefault(reader, "OpenCode binary", defaultOpencode, "")
 	if opencodePath == "" {
-		opencodePath = opencodeBin
+		opencodePath = defaultOpencode
 	}
 
 	printOK("Tools configured")
@@ -110,9 +140,21 @@ func doConfigSetup(st store.Store, clientID string) (userConfig, clientConfig ma
 		"telegram.token":         token,
 		"telegram.allowed_users": users,
 	}
+	// Preserve existing keys not prompted.
+	for k, v := range existing {
+		if _, set := userConfig[k]; !set {
+			userConfig[k] = v
+		}
+	}
+
 	clientConfig = map[string]string{
 		"process.claudecode_binary": claudePath,
 		"process.opencode_binary":   opencodePath,
+	}
+	for k, v := range existingClient {
+		if _, set := clientConfig[k]; !set {
+			clientConfig[k] = v
+		}
 	}
 
 	if err := st.SetUserConfig(userConfig); err != nil {

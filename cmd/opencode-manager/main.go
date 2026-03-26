@@ -178,8 +178,32 @@ func runServe() {
 	}
 
 	if err := config.Validate(cfg); err != nil {
-		slog.Error("config validation failed", "error", err)
-		os.Exit(1)
+		if isInteractiveTerminal() {
+			slog.Warn("config incomplete, launching setup", "error", err)
+			userConfig, clientConfig = doConfigSetup(st, creds.ClientID)
+			cfg = config.LoadFromSettings(userConfig, clientConfig)
+			config.ApplyEnvOverrides(cfg)
+			cfg.Firebase.Enabled = true
+			cfg.Firebase.APIKey = creds.Firebase.APIKey
+			cfg.Firebase.ServerAPIKey = creds.Firebase.ServerAPIKey
+			cfg.Firebase.DatabaseURL = creds.Firebase.DatabaseURL
+			cfg.Firebase.RefreshToken = creds.Firebase.RefreshToken
+			cfg.Firebase.Email = creds.Firebase.Email
+			cfg.Firebase.Password = creds.Firebase.Password
+			if cfg.Firebase.ProjectID == "" {
+				cfg.Firebase.ProjectID = creds.Firebase.ProjectID
+				if cfg.Firebase.ProjectID == "" {
+					cfg.Firebase.ProjectID = deriveProjectID(creds.Firebase.DatabaseURL)
+				}
+			}
+			if err := config.Validate(cfg); err != nil {
+				slog.Error("config validation failed", "error", err)
+				os.Exit(1)
+			}
+		} else {
+			slog.Error("config validation failed", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	// Create and start application.
