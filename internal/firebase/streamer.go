@@ -20,7 +20,7 @@ type Streamer struct {
 
 func NewStreamer(rtdb *RTDB, uid, clientID string, flushInterval time.Duration) *Streamer {
 	if flushInterval <= 0 {
-		flushInterval = 300 * time.Millisecond
+		flushInterval = 100 * time.Millisecond
 	}
 	return &Streamer{
 		rtdb:          rtdb,
@@ -70,21 +70,20 @@ func (s *Streamer) streamSession(ctx context.Context, sessionID string, in <-cha
 
 	// Periodic flush goroutine.
 	ticker := time.NewTicker(s.flushInterval)
-	defer ticker.Stop()
-
-	flushDone := make(chan struct{})
+	stopFlush := make(chan struct{})
 	go func() {
-		defer close(flushDone)
 		for {
 			select {
 			case <-ticker.C:
 				s.flush(ctx, path, state)
-			case <-ctx.Done():
-				return
-			case <-flushDone:
+			case <-stopFlush:
 				return
 			}
 		}
+	}()
+	defer func() {
+		close(stopFlush)
+		ticker.Stop()
 	}()
 
 	for evt := range in {
