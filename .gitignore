@@ -3,6 +3,9 @@
 node_modules/
 web/node_modules/
 web/.angular/
+dashboard/node_modules/
+dashboard/.angular/
+dashboard/dist/
 internal/web/dist/
 credentials.yaml
 opencode-manager.yaml

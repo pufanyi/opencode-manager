@@ -113,7 +113,7 @@ func (a *App) Start(ctx context.Context) error {
 
 	// Start web dashboard.
 	if a.devMode {
-		dp, err := web.StartDevProxy("web")
+		dp, err := web.StartDevProxy("dashboard")
 		if err != nil {
 			return fmt.Errorf("starting angular dev server: %w", err)
 		}
