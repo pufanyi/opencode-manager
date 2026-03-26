@@ -74,7 +74,7 @@ func (s *FirestoreStore) userConfigPath() string {
 }
 
 func (s *FirestoreStore) clientConfigPath(clientID string) string {
-	return fmt.Sprintf("users/%s/config/clients/%s", s.uid, clientID)
+	return fmt.Sprintf("users/%s/config/client_%s", s.uid, clientID)
 }
 
 // ── Instances ───────────────────────────────────────────────────────────────
