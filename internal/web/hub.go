@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 
@@ -51,7 +52,8 @@ func (h *StreamHub) Broadcast(sessionID string, evt provider.StreamEvent) {
 			select {
 			case c.send <- data:
 			default:
-				// Drop if client is slow
+				slog.Warn("web: dropped event for slow SSE client",
+					"session", sessionID, "type", evt.Type)
 			}
 		}
 	}
