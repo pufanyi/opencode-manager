@@ -108,7 +108,16 @@ func (cl *CommandListener) processCommand(ctx context.Context, instanceID, comma
 	}
 
 	if cmd.Status != "pending" {
-		return // Already processed
+		// Clean up stale commands discovered during reconnection.
+		if cmd.Status == "done" || cmd.Status == "error" {
+			cmdPath := CommandPath(cl.uid, instanceID, commandID)
+			go func() {
+				if err := cl.rtdb.Delete(context.Background(), cmdPath); err != nil {
+					slog.Warn("firebase: failed to cleanup stale command", "path", cmdPath, "error", err)
+				}
+			}()
+		}
+		return
 	}
 
 	cmdPath := CommandPath(cl.uid, instanceID, commandID)
@@ -146,6 +155,14 @@ func (cl *CommandListener) processCommand(ctx context.Context, instanceID, comma
 	if err := cl.rtdb.Update(ctx, cmdPath, update); err != nil {
 		slog.Warn("firebase: failed to update command status", "error", err)
 	}
+
+	// Delete the command after a short delay so the frontend can read the result.
+	go func() {
+		time.Sleep(10 * time.Second)
+		if err := cl.rtdb.Delete(context.Background(), cmdPath); err != nil {
+			slog.Warn("firebase: failed to cleanup command", "path", cmdPath, "error", err)
+		}
+	}()
 }
 
 func splitPath(path string) []string {
