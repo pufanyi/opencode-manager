@@ -146,23 +146,28 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
   async sendPrompt() {
     if (!this.instance || !this.selectedSessionId || !this.promptText.trim() || !this.uid) return;
 
+    const content = this.promptText.trim();
+    this.promptText = "";
     this.streaming = true;
     this.responseText = "";
     this.toolCalls = [];
 
-    // Start listening to the stream BEFORE sending the command.
+    // Add user message to history immediately for responsive UI.
+    this.history = [...this.history, { role: "user", content, toolCalls: [] }];
+    this.scrollToBottom();
+
+    // Clear stale stream data, then subscribe, then send command.
+    await this.firebase.clearStream(this.uid, this.selectedSessionId);
     this.listenToStream(this.selectedSessionId);
 
     try {
       await this.firebase.sendCommand(this.uid, this.instance.id, "prompt", {
         session_id: this.selectedSessionId,
-        content: this.promptText.trim(),
+        content,
       });
     } catch {
       this.streaming = false;
     }
-
-    this.promptText = "";
   }
 
   onKeyDown(event: KeyboardEvent): void {
@@ -187,6 +192,16 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
         if (data.error) {
           this.responseText += `\n\n[ERROR] ${data.error}`;
         }
+        // Move completed response into history.
+        if (this.responseText) {
+          this.history = [
+            ...this.history,
+            { role: "assistant", content: this.responseText, toolCalls: [...this.toolCalls] },
+          ];
+          this.responseText = "";
+          this.toolCalls = [];
+        }
+        this.cleanup();
       }
 
       this.scrollToBottom();

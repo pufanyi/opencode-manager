@@ -17,6 +17,7 @@ import {
   onValue,
   push,
   ref,
+  remove,
   set,
   type Unsubscribe,
 } from "firebase/database";
@@ -183,6 +184,11 @@ export class FirebaseService {
     return onValue(dbRef, (snapshot) => {
       this.zone.run(() => callback(snapshot.val()));
     });
+  }
+
+  async clearStream(uid: string, sessionId: string): Promise<void> {
+    const dbRef = ref(this.db, `users/${uid}/streams/${sessionId}`);
+    await remove(dbRef);
   }
 
   // -- RTDB: Commands (user-scoped) --
