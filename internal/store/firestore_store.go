@@ -387,4 +387,3 @@ func (s *FirestoreStore) ListMessages(instanceID, sessionID string) ([]*Message,
 	}
 	return messages, nil
 }
-

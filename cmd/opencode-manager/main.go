@@ -39,12 +39,9 @@ const (
 )
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "relogin":
-			runRelogin()
-			return
-		}
+	if len(os.Args) > 1 && os.Args[1] == "relogin" {
+		runRelogin()
+		return
 	}
 
 	runServe()

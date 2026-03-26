@@ -44,7 +44,7 @@ type ClaudeCodeProvider struct {
 	// Main-dir exclusive lock: at most one session may use the main
 	// directory at a time.
 	mainDirMu     sync.Mutex
-	mainDirHolder string         // session ID currently holding the lock
+	mainDirHolder string          // session ID currently holding the lock
 	mainDirNotify []chan struct{} // closed when main dir becomes free
 }
 
