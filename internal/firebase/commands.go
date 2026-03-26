@@ -69,26 +69,49 @@ func (cl *CommandListener) Listen(ctx context.Context) error {
 }
 
 func (cl *CommandListener) handleEvent(ctx context.Context, evt SSEEvent) {
-	// Path format from root listener: /{instanceId}/{commandId}
-	// or /{instanceId}/{commandId}/{field}
 	parts := splitPath(evt.Path)
-	if len(parts) < 2 {
-		return
-	}
-	instanceID := parts[0]
-	commandID := parts[1]
 
-	// Read the full command to check status.
-	cmdPath := CommandPath(cl.uid, instanceID, commandID)
+	switch len(parts) {
+	case 0:
+		// Path "/" — initial snapshot: { instanceId: { cmdId: {...}, ... }, ... }
+		var instances map[string]map[string]json.RawMessage
+		if err := json.Unmarshal(evt.Data, &instances); err != nil {
+			return
+		}
+		for instID, cmds := range instances {
+			for cmdID, raw := range cmds {
+				cl.processCommand(ctx, instID, cmdID, raw)
+			}
+		}
+	case 1:
+		// Path "/{instanceId}" — new or updated instance node: { cmdId: {...}, ... }
+		var cmds map[string]json.RawMessage
+		if err := json.Unmarshal(evt.Data, &cmds); err != nil {
+			return
+		}
+		for cmdID, raw := range cmds {
+			cl.processCommand(ctx, parts[0], cmdID, raw)
+		}
+	case 2:
+		// Path "/{instanceId}/{commandId}" — single command
+		cl.processCommand(ctx, parts[0], parts[1], evt.Data)
+	default:
+		// Deeper path (field-level update, e.g. our own status writes) — skip.
+	}
+}
+
+// processCommand parses a command from inline SSE data and executes it if pending.
+func (cl *CommandListener) processCommand(ctx context.Context, instanceID, commandID string, data json.RawMessage) {
 	var cmd Command
-	if err := cl.rtdb.Get(ctx, cmdPath, &cmd); err != nil {
-		slog.Warn("firebase: failed to read command", "error", err)
+	if err := json.Unmarshal(data, &cmd); err != nil {
 		return
 	}
 
 	if cmd.Status != "pending" {
 		return // Already processed
 	}
+
+	cmdPath := CommandPath(cl.uid, instanceID, commandID)
 
 	// Acknowledge with client_id.
 	if err := cl.rtdb.Update(ctx, cmdPath, map[string]interface{}{
