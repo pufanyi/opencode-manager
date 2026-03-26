@@ -2,11 +2,12 @@
 
 ## Overview
 
-OpenCode Manager is a single Go binary (`opencode-manager`) that supervises multiple Claude Code and OpenCode instances. It exposes three interfaces:
+OpenCode Manager is a single Go binary (`opencode-manager`) that supervises multiple Claude Code and OpenCode instances. It exposes four interfaces:
 
 - **Telegram bot** -- primary mobile interface for sending prompts and managing instances
-- **Embedded web dashboard** -- local browser UI served from the binary
-- **Firebase web frontend** -- cloud-hosted Angular app that communicates via Firebase
+- **Local dashboard** (`dashboard/`) -- Angular 21 SPA embedded in the binary, talks directly to the Go HTTP API + SSE
+- **Remote web frontend** (`web/`) -- Angular 21 SPA hosted on Firebase Hosting, communicates via Firebase RTDB/Firestore relay
+- **REST API + SSE** -- direct HTTP endpoints used by the local dashboard and other clients
 
 All persistent data lives in Firebase (Firestore for durable records, RTDB for real-time ephemeral state). The Go process is a **client** to Firebase -- it signs in as a regular Firebase user via the REST API and reads/writes data under its own UID. There is no local database, no Admin SDK, and no service account.
 
@@ -18,16 +19,16 @@ All persistent data lives in Firebase (Firestore for durable records, RTDB for r
 └─────────────┘         │  │   Bot   │  │   Process   │  │ FirestoreStore  │  │
                         │  │         │  │   Manager   │  │  (via REST API) │  │
 ┌─────────────┐         │  └────┬────┘  └──────┬──────┘  └────────┬────────┘  │
-│  Embedded   │◄───────►│  ┌────┴────┐  ┌──────┴──────┐           │           │
-│  Web UI     │         │  │  Web    │  │  Provider   │           │           │
-└─────────────┘         │  │ Server  │  │ Abstraction │           │           │
-                        │  └─────────┘  └──────┬──────┘           │           │
-┌─────────────┐         │                      │                  │           │
-│  Firebase   │         │           ┌──────────┼──────────┐       │           │
-│  Web App    │◄──RTDB──┤           │          │          │       │           │
-│  (Angular)  │         │     ┌─────▼─────┐ ┌──▼───────┐ │       │           │
-└─────────────┘         │     │claude -p  │ │ opencode │ │       │           │
-                        │     │(per prompt)│ │ serve ×N │ │       │           │
+│   Local     │◄─HTTP──►│  ┌────┴────┐  ┌──────┴──────┐           │           │
+│  Dashboard  │◄─SSE────│  │  Web    │  │  Provider   │           │           │
+│  (embedded) │         │  │ Server  │  │ Abstraction │           │           │
+└─────────────┘         │  └─────────┘  └──────┬──────┘           │           │
+                        │                      │                  │           │
+┌─────────────┐         │           ┌──────────┼──────────┐       │           │
+│  Firebase   │         │           │          │          │       │           │
+│  Web App    │◄──RTDB──┤     ┌─────▼─────┐ ┌──▼───────┐ │       │           │
+│  (remote)   │         │     │claude -p  │ │ opencode │ │       │           │
+└─────────────┘         │     │(per prompt)│ │ serve ×N │ │       │           │
                         │     └───────────┘ └──────────┘ │       │           │
                         └───────────────────────────────────────────────────────┘
                                          │                        │
@@ -161,14 +162,42 @@ Persistence layer.
 
 ### `internal/web/`
 
-Embedded web dashboard.
+Embedded dashboard server. Serves the local dashboard (Angular build) and exposes the REST API + SSE hub used by both the local dashboard and external clients.
 
 | File | Purpose |
 |------|---------|
 | `server.go` | HTTP server lifecycle, embedded Angular build via `go:embed`, CORS middleware |
-| `api.go` | REST API handlers (instances CRUD, sessions, prompt, abort) |
+| `api.go` | REST API handlers (instances CRUD, sessions, prompt, abort, settings) |
 | `hub.go` | SSE StreamHub for real-time event streaming to browser clients |
 | `devproxy.go` | Reverse proxy to Angular dev server for HMR during development |
+
+### `dashboard/` (Angular 21 — Local Dashboard)
+
+Local-only Angular SPA embedded in the Go binary at build time. Communicates directly with the Go HTTP API and SSE hub — no Firebase dependency.
+
+| File | Purpose |
+|------|---------|
+| `src/app/services/api.service.ts` | HTTP client for REST API + EventSource for SSE streaming |
+| `src/app/components/instance-list/` | Instance management (create, start, stop, delete) |
+| `src/app/components/prompt-panel/` | Session selector, prompt input, real-time streaming via SSE (`/api/ws`) |
+| `src/app/components/settings/` | Bot status, app settings |
+
+**Key difference from `web/`**: No auth, no Firebase JS SDK. All data flows directly via `fetch()` to `/api/*` endpoints and `EventSource` to `/api/ws`.
+
+### `web/` (Angular 21 — Remote Web Frontend)
+
+Firebase-powered Angular SPA for remote access. Communicates entirely through Firebase RTDB and Firestore — no direct HTTP connection to the Go server.
+
+| File | Purpose |
+|------|---------|
+| `src/app/services/firebase.service.ts` | Firebase Auth + RTDB + Firestore operations |
+| `src/app/guards/auth.guard.ts` | Route guard requiring Firebase Auth |
+| `src/app/components/login/` | Google / email sign-in |
+| `src/app/components/dashboard/` | Instance grid, account linking |
+| `src/app/components/instance-card/` | Instance status card with provider badge |
+| `src/app/components/prompt-panel/` | Session selector, message history, real-time streaming via RTDB |
+
+**Key difference from `dashboard/`**: Requires Firebase Auth (Google or email). Commands go through RTDB → Go server picks up via SSE. No direct HTTP to Go.
 
 ### `internal/gitops/`
 
@@ -310,6 +339,27 @@ users/{uid}/
     - User + assistant messages persisted to Firestore
     - Auto-merge worktree branch back to main (if applicable)
     - Board removes completed task
+```
+
+### Local Dashboard Flow (direct HTTP + SSE)
+
+```
+1. Dashboard calls REST API directly:
+   POST /api/prompt { instance_id, session_id, content }
+   → Go handler validates, calls Provider.Prompt()
+   → Returns 200 immediately
+
+2. Dashboard opens SSE connection:
+   GET /api/ws?session={sessionId}
+   → Go StreamHub broadcasts provider events as SSE messages
+
+3. Events flow:
+   Provider.Prompt() → event channel → StreamHub.Broadcast()
+                                      → SSE to dashboard (immediate)
+                                      → Streamer.WrapEvents() → RTDB (for web frontend)
+
+4. Dashboard receives SSE events in real time:
+   EventSource.onmessage → update UI (text, tool calls, done/error)
 ```
 
 ### Web Command Flow (via Firebase)

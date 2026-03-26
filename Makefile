@@ -7,7 +7,7 @@ setup: build
 	$(BUILD_DIR)/$(BINARY) setup
 
 dashboard:
-	cd dashboard && npm run build -- --output-path ../internal/web/dist
+	cd dashboard && pnpm run build -- --output-path ../internal/web/dist
 
 web:
 	cd web && pnpm ng build --output-path ../internal/web/dist
@@ -24,7 +24,6 @@ dev:
 	go run ./cmd/opencode-manager -dev
 
 lint:
-	cd dashboard && npx biome check src/ || true
 	cd web && pnpm biome check src/
 	golangci-lint run ./...
 

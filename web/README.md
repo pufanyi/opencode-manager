@@ -1,59 +1,66 @@
-# Web
+# Remote Web Frontend
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 19.2.22.
+Angular 21 single-page application for managing OpenCode Manager instances remotely. Communicates entirely through Firebase (RTDB + Firestore) -- no direct connection to the Go server.
 
-## Development server
+## Architecture
 
-To start a local development server, run:
+Unlike the local dashboard (`dashboard/`), the remote web frontend uses Firebase as a relay:
 
-```bash
-ng serve
-```
+- **Firebase Auth** -- Google or email/password sign-in
+- **Firebase RTDB** -- real-time streaming, commands, presence
+- **Firebase Firestore** -- instance list, session history, messages
 
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
+The Go server and web frontend are both Firebase clients. No public IP, port forwarding, or tunnels are required.
 
-## Code scaffolding
-
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
+## Development
 
 ```bash
-ng generate component component-name
+cd web
+pnpm install
+pnpm start        # ng serve on http://localhost:4200
 ```
 
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
-
-```bash
-ng generate --help
-```
+Requires Firebase project credentials configured in `src/environments/`.
 
 ## Building
 
-To build the project run:
-
 ```bash
-ng build
+make web          # Builds for Firebase Hosting deployment
 ```
 
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
+## Deployment
 
-## Running unit tests
+The web frontend is deployed to Firebase Hosting via GitHub Actions:
 
-To execute unit tests with the [Karma](https://karma-runner.github.io) test runner, use the following command:
+- **On PR**: Preview deployment (`firebase-hosting-pull-request.yml`)
+- **On merge to main**: Production deployment (`firebase-hosting-merge.yml`)
 
-```bash
-ng test
+## Project Structure
+
+```
+src/app/
+├── services/
+│   └── firebase.service.ts         Firebase Auth + RTDB + Firestore operations
+├── guards/
+│   └── auth.guard.ts               Route guard requiring Firebase Auth
+├── components/
+│   ├── login/                      Google / email sign-in
+│   ├── dashboard/                  Instance grid, account linking
+│   ├── instance-card/              Instance status card with provider badge
+│   └── prompt-panel/               Session selector, history, RTDB streaming
+├── app.component.ts                Root component
+├── app.config.ts                   App + Firebase configuration
+└── app.routes.ts                   Route definitions
 ```
 
-## Running end-to-end tests
+## Tech Stack
 
-For end-to-end (e2e) testing, run:
-
-```bash
-ng e2e
-```
-
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
-
-## Additional Resources
-
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+| Layer | Choice |
+|-------|--------|
+| Framework | Angular 21 (standalone components) |
+| TypeScript | 5.9 |
+| Bundler | Angular CLI (esbuild) |
+| Linter | Biome |
+| Auth | Firebase Auth JS SDK |
+| Persistent data | Firebase Firestore JS SDK |
+| Real-time data | Firebase RTDB JS SDK |

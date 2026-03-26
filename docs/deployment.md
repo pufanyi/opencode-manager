@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - **Go 1.24+**
-- **Node.js 22+** and **pnpm** (for building the Angular web frontend)
+- **Node.js 22+** and **pnpm** (for building the Angular 21 frontends)
 - **Firebase project** with Realtime Database and Firestore enabled
 - **Telegram bot token** (create one via [@BotFather](https://t.me/BotFather))
 - **Provider binaries** installed:
@@ -20,8 +20,10 @@ make build
 ```
 
 `make build` runs two steps:
-1. Builds the Angular frontend (`cd web && pnpm ng build --output-path ../internal/web/dist`)
-2. Compiles the Go binary with the frontend embedded (`go build -o ./bin/opencode-manager ./cmd/opencode-manager`)
+1. Builds the local dashboard (`cd dashboard && pnpm run build --output-path ../internal/web/dist`)
+2. Compiles the Go binary with the dashboard embedded (`go build -o ./bin/opencode-manager ./cmd/opencode-manager`)
+
+To build the remote web frontend for Firebase Hosting instead: `make web`.
 
 The resulting binary is at `./bin/opencode-manager`.
 
@@ -208,15 +210,15 @@ tmux new-session -d -s ocm './bin/opencode-manager -credentials credentials.yaml
 tmux attach -t ocm
 ```
 
-## Web Frontend
+## Frontends
 
-The Angular web dashboard is **embedded in the binary** at build time. No separate deployment is needed. When `web.enabled` is `true` in the Firestore config (or forced by `-dev` flag), the dashboard is served at the configured address (default `:8080`).
+OpenCode Manager has two Angular 21 frontends:
 
-The frontend communicates with the Go server entirely through Firebase (RTDB + Firestore). Both sides are Firebase clients making outbound HTTPS connections -- there is no direct connection between them. This means the Go server needs no public IP, no port forwarding, and no tunnels.
+### Local Dashboard (embedded in binary)
 
-### Development mode
+The local dashboard (`dashboard/`) is **embedded in the binary** at build time via `go:embed`. It communicates directly with the Go server via REST API and SSE -- no Firebase round-trip needed. Served at the configured address (default `:8080`).
 
-For frontend development with Angular hot module replacement (HMR):
+For development with Angular hot module replacement (HMR):
 
 ```bash
 make dev
@@ -227,6 +229,14 @@ This starts the Go server with `-dev` flag, which:
 2. Starts the Angular dev server (`pnpm ng serve`) as a subprocess
 3. Reverse-proxies all non-API requests to the Angular dev server
 4. Supports HMR and WebSocket connections for live reload
+
+### Remote Web Frontend (Firebase Hosting)
+
+The remote web frontend (`web/`) is deployed to Firebase Hosting and communicates with the Go server entirely through Firebase (RTDB + Firestore). Both sides are Firebase clients making outbound HTTPS connections -- there is no direct connection between them. This means the Go server needs no public IP, no port forwarding, and no tunnels.
+
+Deployment is handled by GitHub Actions:
+- **On PR**: Preview deployment to Firebase Hosting
+- **On merge to main**: Production deployment to Firebase Hosting
 
 ## Data and State
 

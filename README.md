@@ -8,6 +8,7 @@ A single-binary tool that manages multiple [Claude Code](https://docs.anthropic.
 - **User-scoped data** — All data under `users/{uid}/` with Firebase security rules enforcing per-user isolation
 - **Multi-client** — Each Go process has a unique `client_id` for instance ownership; run multiple servers safely
 - **Web dashboard** — Real-time streaming visualization via Firebase; login with Google or email, no public IP needed
+- **Local dashboard** — Direct HTTP/SSE dashboard embedded in the binary; no Firebase round-trip, instant response
 - **Dual provider support** — Run both Claude Code (CLI) and OpenCode (HTTP) instances side by side
 - **Telegram interface** — Create, start, stop, switch, and prompt instances from any Telegram client
 - **Active Tasks board** — Live status dashboard in Telegram showing all running tasks with tool progress
@@ -21,7 +22,7 @@ A single-binary tool that manages multiple [Claude Code](https://docs.anthropic.
 ## Prerequisites
 
 - Go 1.24+
-- Node.js 22+ and pnpm (for building the web dashboard)
+- Node.js 22+ and pnpm (for building the frontends)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and/or [OpenCode](https://github.com/sst/opencode) in `$PATH`
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 - A [Firebase](https://console.firebase.google.com) project with Realtime Database + Firestore enabled
@@ -85,19 +86,31 @@ If the stored refresh token expires:
 
 ```
 ┌────────────────┐           ┌──────────────────────────┐           ┌────────────────┐
-│   Go Server    │──writes──→│        Firebase           │←─listens─│   Web Frontend │
-│  (your server) │           │                           │           │ (embedded SPA) │
+│   Go Server    │──writes──→│        Firebase           │←─listens─│  Web Frontend  │
+│  (your server) │           │                           │           │   (remote)     │
 │                │←─listens─│  ┌─────────────────────┐  │──writes──→│                │
 │ ├ Process Mgr  │           │  │ Auth (Google/email) │  │           │ ├ Login        │
 │ ├ TG Bot       │           │  ├─────────────────────┤  │           │ ├ Dashboard    │
 │ ├ Cmd Listener │           │  │ Firestore (durable) │  │           │ ├ Instance mgr │
-│ └ Presence     │           │  │ └ users/{uid}/...   │  │           │ └ Prompt panel │
-│                │           │  ├─────────────────────┤  │           │                │
-│ No public IP   │           │  │ RTDB (realtime)     │  │           │ No backend     │
-│ No open ports  │           │  │ └ users/{uid}/...   │  │           │ Pure SPA       │
-└────────────────┘           │  └─────────────────────┘  │           └────────────────┘
-                             └──────────────────────────┘
+│ ├ Presence     │           │  │ └ users/{uid}/...   │  │           │ └ Prompt panel │
+│ ├ HTTP API ◄───┼───────────┼──┼─────────────────────┤  │           └────────────────┘
+│ └ SSE Hub      │           │  │ RTDB (realtime)     │  │
+│                │           │  │ └ users/{uid}/...   │  │           ┌────────────────┐
+│                │           │  └─────────────────────┘  │           │ Local Dashboard│
+│                │◄──HTTP────┼──────────────────────────┼───────────│   (embedded)   │
+│                │◄──SSE─────┼──────────────────────────┼───────────│                │
+│                │           │                           │           │ ├ Instance list │
+└────────────────┘           └──────────────────────────┘           │ ├ Prompt panel │
+                                                                    │ └ Settings     │
+                                                                    └────────────────┘
 ```
+
+**Two frontends:**
+
+| Frontend | Communication | Auth | Use Case |
+|----------|--------------|------|----------|
+| **Local dashboard** (`dashboard/`) | Direct HTTP API + SSE to Go server | None (same machine) | Local access, no latency |
+| **Web frontend** (`web/`) | Firebase RTDB + Firestore relay | Firebase Auth (Google/email) | Remote access, no public IP needed |
 
 **Data storage split:**
 
@@ -133,9 +146,9 @@ internal/
 ├── bot/                     Telegram bot handlers, callbacks, streaming board
 ├── gitops/                  Git worktree merge-back
 ├── opencode/                OpenCode HTTP client
-└── web/                     Embedded web dashboard (serves Angular build)
+└── web/                     Embedded dashboard (serves Angular build + REST API + SSE hub)
 
-dashboard/                   Angular 19 — Local dashboard (direct HTTP API + SSE)
+dashboard/                   Angular 21 — Local dashboard (direct HTTP API + SSE)
 └── src/app/
     ├── services/api.service.ts                 Direct HTTP + SSE to Go server
     └── components/
@@ -143,7 +156,7 @@ dashboard/                   Angular 19 — Local dashboard (direct HTTP API + S
         ├── prompt-panel/                       Prompt + streaming via SSE (/api/ws)
         └── settings/                           Bot status, app settings
 
-web/                         Angular 19 — Remote frontend (Firebase relay)
+web/                         Angular 21 — Remote frontend (Firebase relay)
 └── src/app/
     ├── services/firebase.service.ts            Firebase Auth + RTDB + Firestore
     ├── guards/auth.guard.ts                    Route guard
@@ -172,11 +185,12 @@ Flags:
 ## Makefile Targets
 
 ```bash
-make build       # Build frontend + Go binary → bin/opencode-manager
-make web         # Build Angular frontend only
-make dev         # Dev mode: Go with Angular HMR
+make build       # Build local dashboard + Go binary → bin/opencode-manager
+make dashboard   # Build local dashboard (Angular) only
+make web         # Build remote web frontend (Angular) only
+make dev         # Dev mode: Go with Angular HMR for dashboard
 make run         # Build and run
-make lint        # golangci-lint + Biome
+make lint        # golangci-lint + Biome (dashboard + web)
 make clean       # Remove build artifacts
 make tidy        # go mod tidy
 ```

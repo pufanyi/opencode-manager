@@ -1,59 +1,58 @@
-# Dashboard
+# Local Dashboard
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 19.2.22.
+Angular 21 single-page application for managing OpenCode Manager instances locally. Communicates directly with the Go server via REST API and SSE -- no Firebase dependency.
 
-## Development server
+## Architecture
 
-To start a local development server, run:
+Unlike the remote web frontend (`web/`), the local dashboard talks directly to the Go HTTP server:
 
-```bash
-ng serve
-```
+- **REST API** (`/api/*`) -- instance CRUD, sessions, prompts
+- **SSE** (`/api/ws`) -- real-time streaming of prompt responses
 
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
+No authentication is required -- the dashboard runs on the same machine as the Go server.
 
-## Code scaffolding
-
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
+## Development
 
 ```bash
-ng generate component component-name
+# From the project root:
+make dev          # Starts Go server + Angular dev server with HMR
+
+# Or manually:
+cd dashboard
+pnpm install
+pnpm start        # ng serve on http://localhost:4200
 ```
 
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
-
-```bash
-ng generate --help
-```
+In dev mode (`-dev` flag), the Go server reverse-proxies non-API requests to the Angular dev server for hot module replacement.
 
 ## Building
 
-To build the project run:
-
 ```bash
-ng build
+make dashboard    # Builds and copies output to internal/web/dist for embedding
 ```
 
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
+The build output is embedded into the Go binary via `go:embed`.
 
-## Running unit tests
+## Project Structure
 
-To execute unit tests with the [Karma](https://karma-runner.github.io) test runner, use the following command:
-
-```bash
-ng test
+```
+src/app/
+├── services/
+│   └── api.service.ts              HTTP client + SSE connection to Go server
+├── components/
+│   ├── instance-list/              Instance management (create/start/stop/delete)
+│   ├── prompt-panel/               Session selector, prompt input, SSE streaming display
+│   └── settings/                   Telegram bot status, app settings
+├── app.component.ts                Root component
+└── app.config.ts                   App configuration
 ```
 
-## Running end-to-end tests
+## Tech Stack
 
-For end-to-end (e2e) testing, run:
-
-```bash
-ng e2e
-```
-
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
-
-## Additional Resources
-
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+| Layer | Choice |
+|-------|--------|
+| Framework | Angular 21 (standalone components) |
+| TypeScript | 5.9 |
+| Bundler | Angular CLI (esbuild) |
+| Linter | Biome |
+| Communication | `fetch()` + `EventSource` (no external HTTP library) |
