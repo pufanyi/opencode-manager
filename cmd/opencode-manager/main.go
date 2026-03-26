@@ -18,6 +18,7 @@ import (
 type credentialsFile struct {
 	Firebase struct {
 		APIKey       string `yaml:"api_key"`
+		ServerAPIKey string `yaml:"server_api_key,omitempty"`
 		DatabaseURL  string `yaml:"database_url"`
 		AuthDomain   string `yaml:"auth_domain,omitempty"`
 		ProjectID    string `yaml:"project_id,omitempty"`
@@ -30,10 +31,11 @@ type credentialsFile struct {
 
 // Default Firebase project values (from environment.ts).
 const (
-	defaultAPIKey  = "AIzaSyCECBGZeLmLdi2a8Viii7iIoYksLKlDPPY"
-	defaultDBURL   = "https://opencode-manager-default-rtdb.firebaseio.com"
-	defaultAuthDom = "opencode-manager.firebaseapp.com"
-	defaultProjID  = "opencode-manager"
+	defaultAPIKey       = "AIzaSyCECBGZeLmLdi2a8Viii7iIoYksLKlDPPY" // browser key (with referrer restrictions)
+	defaultServerAPIKey = "AIzaSyByIo86in28AaxA6g8X9aOCIzKBAzF1vek" // server key (no referrer restrictions)
+	defaultDBURL        = "https://opencode-manager-default-rtdb.firebaseio.com"
+	defaultAuthDom      = "opencode-manager.firebaseapp.com"
+	defaultProjID       = "opencode-manager"
 )
 
 func main() {
@@ -156,6 +158,7 @@ func runServe() {
 	// Force Firebase enabled with credentials from file.
 	cfg.Firebase.Enabled = true
 	cfg.Firebase.APIKey = creds.Firebase.APIKey
+	cfg.Firebase.ServerAPIKey = creds.Firebase.ServerAPIKey
 	cfg.Firebase.DatabaseURL = creds.Firebase.DatabaseURL
 	cfg.Firebase.RefreshToken = creds.Firebase.RefreshToken
 	cfg.Firebase.Email = creds.Firebase.Email

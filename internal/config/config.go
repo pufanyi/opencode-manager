@@ -17,7 +17,8 @@ type Config struct {
 
 type FirebaseConfig struct {
 	Enabled      bool
-	APIKey       string
+	APIKey       string // browser key (with referrer restrictions)
+	ServerAPIKey string // server key (no referrer restrictions, used for token refresh)
 	DatabaseURL  string
 	ProjectID    string // required for Firestore
 	Email        string // Go client email (email/password mode)
@@ -163,6 +164,9 @@ func ApplyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("FIREBASE_API_KEY"); v != "" {
 		cfg.Firebase.APIKey = v
+	}
+	if v := os.Getenv("FIREBASE_SERVER_API_KEY"); v != "" {
+		cfg.Firebase.ServerAPIKey = v
 	}
 	if v := os.Getenv("FIREBASE_DATABASE_URL"); v != "" {
 		cfg.Firebase.DatabaseURL = v

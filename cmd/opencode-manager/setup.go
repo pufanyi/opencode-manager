@@ -151,8 +151,13 @@ func newFirebaseClient(creds *credentialsFile) (*firebase.Client, error) {
 	if projectID == "" {
 		projectID = deriveProjectID(creds.Firebase.DatabaseURL)
 	}
+	serverKey := creds.Firebase.ServerAPIKey
+	if serverKey == "" {
+		serverKey = defaultServerAPIKey
+	}
 	return firebase.NewClient(firebase.Config{
 		APIKey:       creds.Firebase.APIKey,
+		ServerAPIKey: serverKey,
 		DatabaseURL:  creds.Firebase.DatabaseURL,
 		ProjectID:    projectID,
 		Email:        creds.Firebase.Email,

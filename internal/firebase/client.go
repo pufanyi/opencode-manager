@@ -12,7 +12,8 @@ import (
 //  1. Email/Password — for dedicated service accounts
 //  2. RefreshToken — from browser-based login (Google, etc.)
 type Config struct {
-	APIKey       string
+	APIKey       string // browser key (with referrer restrictions, used for login page)
+	ServerAPIKey string // server key (no referrer restrictions, used for token refresh)
 	DatabaseURL  string
 	ProjectID    string // required for Firestore
 	Email        string // optional (email/password mode)
@@ -42,7 +43,11 @@ func NewClient(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("firebase: APIKey and DatabaseURL are required")
 	}
 
-	auth := NewAuth(cfg.APIKey)
+	serverKey := cfg.ServerAPIKey
+	if serverKey == "" {
+		serverKey = cfg.APIKey // fallback: use browser key if no server key
+	}
+	auth := NewAuth(serverKey)
 
 	// Sign in with refresh token (from browser login) or email/password.
 	if cfg.RefreshToken != "" {

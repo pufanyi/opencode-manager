@@ -73,6 +73,7 @@ func runLogin() {
 	loginClientID := uuid.New().String()
 	fbClient, err := firebase.NewClient(firebase.Config{
 		APIKey:       projectCfg.APIKey,
+		ServerAPIKey: defaultServerAPIKey,
 		DatabaseURL:  projectCfg.DatabaseURL,
 		ProjectID:    projectCfg.ProjectID,
 		RefreshToken: refreshToken,
@@ -154,12 +155,13 @@ func runLogin() {
 	credClientID := uuid.New().String()
 	content := fmt.Sprintf(`firebase:
   api_key: %q
+  server_api_key: %q
   database_url: %q
   auth_domain: %q
   project_id: %q
   refresh_token: %q
 client_id: %q
-`, projectCfg.APIKey, projectCfg.DatabaseURL, projectCfg.AuthDomain, projectCfg.ProjectID, refreshToken, credClientID)
+`, projectCfg.APIKey, defaultServerAPIKey, projectCfg.DatabaseURL, projectCfg.AuthDomain, projectCfg.ProjectID, refreshToken, credClientID)
 
 	if err := os.WriteFile(*credPath, []byte(content), 0600); err != nil {
 		printFail("Failed to write %s: %v", *credPath, err)
