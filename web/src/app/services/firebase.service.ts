@@ -127,12 +127,12 @@ export class FirebaseService {
     const instances: Instance[] = snapshot.docs.map((d) => {
       const data = d.data();
       return {
-        id: data.id || d.id,
-        name: data.name || "",
-        directory: data.directory || "",
-        status: data.status || "stopped",
-        provider_type: data.provider_type || "claudecode",
-        client_id: data.client_id || "",
+        id: data["id"] || d.id,
+        name: data["name"] || "",
+        directory: data["directory"] || "",
+        status: data["status"] || "stopped",
+        provider_type: data["provider_type"] || "claudecode",
+        client_id: data["client_id"] || "",
       } as Instance;
     });
     instances.sort((a, b) => a.name.localeCompare(b.name));
@@ -147,12 +147,12 @@ export class FirebaseService {
       const instances: Instance[] = snapshot.docs.map((d) => {
         const data = d.data();
         return {
-          id: data.id || d.id,
-          name: data.name || "",
-          directory: data.directory || "",
-          status: data.status || "stopped",
-          provider_type: data.provider_type || "claudecode",
-          client_id: data.client_id || "",
+          id: data["id"] || d.id,
+          name: data["name"] || "",
+          directory: data["directory"] || "",
+          status: data["status"] || "stopped",
+          provider_type: data["provider_type"] || "claudecode",
+          client_id: data["client_id"] || "",
         } as Instance;
       });
       instances.sort((a, b) => a.name.localeCompare(b.name));
@@ -281,11 +281,11 @@ export class FirebaseService {
     return snapshot.docs.map((d) => {
       const data = d.data();
       return {
-        id: data.id || d.id,
-        role: data.role || "user",
-        content: data.content || "",
-        tool_calls: data.tool_calls || [],
-        created_at: data.created_at || "",
+        id: data["id"] || d.id,
+        role: data["role"] || "user",
+        content: data["content"] || "",
+        tool_calls: data["tool_calls"] || [],
+        created_at: data["created_at"] || "",
       } as HistoryMessage;
     });
   }
