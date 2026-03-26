@@ -25,6 +25,7 @@ import {
   type Firestore,
   getDocs,
   getFirestore,
+  onSnapshot,
   orderBy,
   query,
 } from "firebase/firestore";
@@ -117,25 +118,6 @@ export class FirebaseService {
     await signOut(this.auth);
   }
 
-  // -- Account Linking --
-
-  onUserLinkStatus(uid: string, callback: (isLinked: boolean) => void): Unsubscribe {
-    const dbRef = ref(this.db, `users/${uid}/telegram_id`);
-    return onValue(dbRef, (snapshot) => {
-      this.zone.run(() => callback(snapshot.exists() && snapshot.val() !== null));
-    });
-  }
-
-  async generateLinkCode(uid: string): Promise<string> {
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const dbRef = ref(this.db, `link_codes/${code}`);
-    await set(dbRef, {
-      uid,
-      expires: Date.now() + 10 * 60 * 1000,
-    });
-    return code;
-  }
-
   // -- Firestore: Instance List (user-scoped) --
 
   async getInstances(uid: string): Promise<Instance[]> {
@@ -154,6 +136,27 @@ export class FirebaseService {
     });
     instances.sort((a, b) => a.name.localeCompare(b.name));
     return instances;
+  }
+
+  // -- Firestore: Real-time Instance List (user-scoped) --
+
+  onInstances(uid: string, callback: (instances: Instance[]) => void): () => void {
+    const instancesRef = collection(this.firestore, "users", uid, "instances");
+    return onSnapshot(instancesRef, (snapshot) => {
+      const instances: Instance[] = snapshot.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: data["id"] || d.id,
+          name: data["name"] || "",
+          directory: data["directory"] || "",
+          status: data["status"] || "stopped",
+          provider_type: data["provider_type"] || "claudecode",
+          client_id: data["client_id"] || "",
+        } as Instance;
+      });
+      instances.sort((a, b) => a.name.localeCompare(b.name));
+      this.zone.run(() => callback(instances));
+    });
   }
 
   // -- RTDB: Instance Runtime (user-scoped presence) --

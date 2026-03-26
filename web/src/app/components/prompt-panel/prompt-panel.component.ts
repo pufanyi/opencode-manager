@@ -57,15 +57,21 @@ export class PromptPanelComponent implements OnChanges, OnDestroy {
 
   ngOnChanges(changes: SimpleChanges): void {
     if ("instance" in changes) {
-      this.cleanup();
-      this.sessions = [];
-      this.selectedSessionId = "";
-      this.responseText = "";
-      this.streaming = false;
-      this.toolCalls = [];
-      this.history = [];
-      if (this.instance) {
-        this.loadSessions();
+      const prev = changes["instance"].previousValue as Instance | null;
+      const curr = changes["instance"].currentValue as Instance | null;
+
+      // Only reset state when the instance ID actually changes
+      if (prev?.id !== curr?.id) {
+        this.cleanup();
+        this.sessions = [];
+        this.selectedSessionId = "";
+        this.responseText = "";
+        this.streaming = false;
+        this.toolCalls = [];
+        this.history = [];
+        if (this.instance) {
+          this.loadSessions();
+        }
       }
     }
   }

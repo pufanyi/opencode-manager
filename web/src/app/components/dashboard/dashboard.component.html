@@ -9,27 +9,6 @@
     </div>
   </header>
 
-  @if (isLinked === false) {
-    <div class="link-banner">
-      <div class="link-banner-header" (click)="toggleLinkSection()" role="button" tabindex="0" (keydown.enter)="toggleLinkSection()">
-        <span class="link-banner-icon">🔗</span>
-        <span class="link-banner-text">Link Telegram account for mobile access</span>
-        <span class="link-banner-toggle">{{ showLinkSection ? '▲' : '▼' }}</span>
-      </div>
-      @if (showLinkSection) {
-        <div class="link-banner-body">
-          <div class="link-code-box">
-            <span class="link-code">{{ linkCode || '...' }}</span>
-          </div>
-          <ol class="link-steps">
-            <li>Open your Telegram bot</li>
-            <li>Send: <code>/link {{ linkCode || '123456' }}</code></li>
-          </ol>
-        </div>
-      }
-    </div>
-  }
-
   @if (showNewForm) {
     <div class="new-instance-form">
       <div class="form-row">
