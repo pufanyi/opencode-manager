@@ -9,12 +9,7 @@ import {
 } from "@angular/core";
 import { FormsModule } from "@angular/forms";
 import type { Unsubscribe } from "firebase/database";
-import {
-  FirebaseService,
-  type HistoryMessage,
-  type Instance,
-  type StreamData,
-} from "../../services/firebase.service";
+import { FirebaseService, type Instance, type StreamData } from "../../services/firebase.service";
 
 interface Session {
   ID: string;
